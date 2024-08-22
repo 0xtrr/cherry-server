@@ -129,7 +129,8 @@ async fn main() {
         .with_state(app_state);
 
     // Set up TCP listener
-    let listener = tokio::net::TcpListener::bind(&config.hostname)
+    debug!("Binding to {}", &config.host);
+    let listener = tokio::net::TcpListener::bind(&config.host)
         .await
         .expect("Failed to bind to address");
 

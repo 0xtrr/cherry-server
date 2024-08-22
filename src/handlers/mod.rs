@@ -106,7 +106,7 @@ pub async fn get_blob_handler(
                     (Some(server_tag), _) => {
                         // Verify that the server tag matches the URL of this server
                         if let Some(server_url) = server_tag.get(1) {
-                            if server_url != &app_state.config.hostname {
+                            if server_url != &app_state.config.server_url {
                                 let json = Json(ErrorResponse {
                                     message: "Invalid server tag".to_string(),
                                 });
@@ -400,7 +400,7 @@ pub async fn upload_blob_handler(
 
     // Define Blob Descriptor
     let blob_descriptor = BlobDescriptor {
-        url: format!("{}/{}", app_state.config.hostname, file_hash),
+        url: format!("{}/{}", app_state.config.server_url, file_hash),
         sha256: file_hash.clone(),
         size: body.len() as i64,
         r#type: content_type,
@@ -688,7 +688,7 @@ pub async fn mirror_blob_handler(
     }
 
     let blob_descriptor = BlobDescriptor {
-        url: format!("{}/{}", app_state.config.hostname, file_hash),
+        url: format!("{}/{}", app_state.config.server_url, file_hash),
         sha256: file_hash,
         size: blob_data.len() as i64,
         r#type: content_type,

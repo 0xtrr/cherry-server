@@ -8,7 +8,8 @@ use std::{fmt, io};
 pub struct Config {
     pub database_directory: String,
     pub files_directory: String,
-    pub hostname: String,
+    pub server_url: String,
+    pub host: String,
     pub get: GetBlobConfig,
     pub upload: UploadBlobConfig,
     pub list: ListConfig,
