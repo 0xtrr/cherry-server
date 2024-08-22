@@ -1,0 +1,13 @@
+[Unit]
+Description=Cherry Server
+After=syslog.target network.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+ExecStart=/path/to/my/application/bin/myapplication --config /path/to/config.toml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
