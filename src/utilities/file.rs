@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
 
 use axum::body::Bytes;
-use tracing::log::error;
+use tracing::log::{debug, error};
 
 #[derive(Debug)]
 pub enum Error {
@@ -35,6 +35,7 @@ impl fmt::Display for Error {
 pub fn create_directory_if_not_exists(directory_path: &str) -> Result<(), Error> {
     if !Path::new(directory_path).exists() {
         // Config file directory doesn't exist, create a new one
+        debug!("Dir not found, creating new dir at {}", directory_path);
         fs::create_dir(directory_path).map_err(Error::CreateDirectory)?;
     }
     Ok(())
