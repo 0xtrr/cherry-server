@@ -1,5 +1,5 @@
 /target
 .idea
 blobs
-db
+./db
 config.toml
