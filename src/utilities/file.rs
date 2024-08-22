@@ -21,7 +21,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Error::CreateDirectory(_e) => write!(f, "Failed to create new directory"),
+            Error::CreateDirectory(e) => write!(f, "{}", e),
             Error::CreateFile => write!(f, "Unable to create new file"),
             Error::WriteFile => write!(f, "Unable to write blob to file"),
             Error::DeleteFile => write!(f, "Unable to delete blob"),
@@ -33,7 +33,7 @@ impl fmt::Display for Error {
 }
 
 pub fn create_directory_if_not_exists(directory_path: &str) -> Result<(), Error> {
-    if !std::path::Path::new(directory_path).exists() {
+    if !Path::new(directory_path).exists() {
         // Config file directory doesn't exist, create a new one
         fs::create_dir(directory_path).map_err(Error::CreateDirectory)?;
     }
