@@ -1,0 +1,31 @@
+[package]
+name = "cherry-server"
+version = "0.1.0"
+edition = "2021"
+description = "A media server based on the Blossom protocol"
+authors = ["0xtr <oxtrr@protonmail.com>"]
+readme = "README.md"
+homepage = "https://github.com/0xtrr/cherry-server"
+repository = "https://github.com/0xtrr/cherry-server"
+license = "MIT"
+keywords = ["blossom", "server"]
+
+[dependencies]
+axum = { version = "0.7.5", features = ["multipart"] }
+hyper = { version = "1.4.1", features = ["full"] }
+serde = { version = "1.0.204", features = ["derive"] }
+serde_json = "1.0.120"
+tokio = { version = "1.38.0", features = ["full"] }
+tower-http = { version = "0.5.2", features = ["cors"] }
+chrono = "0.4.38"
+sha2 = "0.10.8"
+hex = "0.4.3"
+base64 = "0.22.1"
+async-trait = "0.1.81"
+sqlx = { version = "0.7.4", features = ["runtime-tokio-rustls", "sqlite", "macros"] }
+toml = "0.8.15"
+reqwest = { version = "0.12.5", features = ["json"] }
+url = "2.5.2"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
+clap = { version = "4.5.16", features = ["derive"] }

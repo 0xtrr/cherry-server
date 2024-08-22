@@ -1,0 +1,42 @@
+# Basic settings
+database_directory = './db'
+files_directory = './blobs'
+hostname = '0.0.0.0:3030' # Set to entire url (e.g. https://cdn.oxtr.dev or http://localhost:3030). Used to set the URL in a blob descriptor.
+
+# Get blob settings
+[get]
+require_auth = false # Require authorization to fetch blob
+
+# Upload blob settings
+[upload]
+enabled = true # Enable/disable uploads
+max_size = 50 # In MB
+
+# Upload blob pubkey filter
+[upload.public_key_filter]
+enabled = true
+mode = "Whitelist" # Specify if pubkey list is a whitelist or blacklist
+public_keys = [
+    "b2d670de53b27691c0c3400225b65c35a26d06093bcc41f48ffc71e0907f9d4a",
+]
+
+# Upload blob mimetype filter
+[upload.mimetype_filter]
+enabled = true
+mode = "Whitelist" # Specify if mimetype list is a whitelist or blacklist
+mime_types = [
+    "image/png",
+    "image/jpg",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "video/mp4"
+]
+
+# List blobs settings
+[list]
+require_auth = false # Require authorization for listing blobs
+
+# Mirror blobs settings
+[mirror]
+enable = false # Enable /mirror endpoint
