@@ -8,6 +8,7 @@ use crate::handlers::{
 };
 use crate::utilities::file::create_directory_if_not_exists;
 use axum::http::Method;
+use axum::response::Html;
 use axum::routing::{get, put};
 use axum::Router;
 use clap::Parser;
@@ -116,6 +117,7 @@ async fn main() {
 
     // Configure the API routes
     let app = Router::new()
+        .route("/", get(|| async { Html(include_str!("handlers/html/index.html")) }))
         .route(
             "/:hash",
             get(get_blob_handler)
