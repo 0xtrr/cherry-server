@@ -42,7 +42,7 @@ struct BlobDescriptor {
 #[derive(Parser)]
 struct Args {
     /// Set the full path for the config file.
-    #[clap(short, long = "config-file-path")]
+    #[clap(short, long = "config")]
     config_file_path: Option<String>,
 }
 
