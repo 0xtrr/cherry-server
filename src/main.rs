@@ -76,7 +76,8 @@ async fn main() {
     match create_directory_if_not_exists(&config.files_directory) {
         Ok(_) => {}
         Err(e) => {
-            error!("{}", e)
+            error!("{}", e);
+            exit(1);
         }
     }
 
@@ -84,7 +85,8 @@ async fn main() {
     match create_directory_if_not_exists(&config.database_directory) {
         Ok(_) => {}
         Err(e) => {
-            error!("{}", e)
+            error!("{}", e);
+            exit(1);
         }
     }
 
