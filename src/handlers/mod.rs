@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -19,13 +20,14 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose;
 use base64::Engine;
+use nostr_sdk::{Event, PublicKey, SingleLetterTag, TagKind};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::query_as;
 use tracing::log::error;
 
 #[derive(Debug)]
-pub struct AuthHeader(pub Option<AuthEvent>);
+pub struct AuthHeader(pub Option<Event>);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthEvent {
@@ -43,6 +45,11 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
+/// Used in authorization header inspection
+fn unauthorized_error_response(message: String) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::UNAUTHORIZED, Json(ErrorResponse { message }))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MirrorRequest {
     pub url: String,
@@ -58,23 +65,39 @@ where
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        if let Some(auth_header) = parts.headers.get("Authorization") {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if auth_str.starts_with("Nostr ") {
-                    if let Some(encoded_event) = auth_str.strip_prefix("Nostr ") {
-                        if let Ok(decoded_event) = general_purpose::STANDARD.decode(encoded_event) {
-                            if let Ok(auth_event) =
-                                serde_json::from_slice::<AuthEvent>(&decoded_event)
-                            {
-                                return Ok(AuthHeader(Some(auth_event)));
-                            }
-                        }
-                    }
-                }
-            }
+        let auth_header = parts.headers.get("Authorization").ok_or_else(|| {
+            unauthorized_error_response("Missing Authorization header".to_string())
+        })?;
+
+        let auth_str = auth_header
+            .to_str()
+            .map_err(|_| unauthorized_error_response("Invalid Authorization header".to_string()))?;
+
+        if !auth_str.starts_with("Nostr") {
+            return Err(unauthorized_error_response(
+                "Invalid Authorization header".to_string(),
+            ));
         }
 
-        Ok(AuthHeader(None))
+        let encoded_event = auth_str.strip_prefix("Nostr ").unwrap();
+        let decoded_event = general_purpose::STANDARD
+            .decode(encoded_event)
+            .map_err(|err| {
+                unauthorized_error_response(format!("Invalid base64 encoding: {}", err))
+            })?;
+
+        match serde_json::from_slice::<Event>(&decoded_event) {
+            Ok(event) => match event.verify_signature() {
+                Ok(_) => Ok(AuthHeader(Some(event))),
+                Err(_) => Err(unauthorized_error_response(
+                    "Invalid signature in authorization event".to_string(),
+                )),
+            },
+            Err(err) => Err(unauthorized_error_response(format!(
+                "Invalid authorization event: {}",
+                err
+            ))),
+        }
     }
 }
 
@@ -99,39 +122,28 @@ pub async fn get_blob_handler(
                 }
 
                 // Verify that the event contains either a server tag or an x tag
-                let server_tag = auth_event.tags.iter().find(|tag| tag[0] == "server");
-                let x_tag = auth_event.tags.iter().find(|tag| tag[0] == "x");
+                let x_tag_value = auth_event.get_tag_content(TagKind::SingleLetter(
+                    SingleLetterTag::from_char('x').unwrap(),
+                ));
+                let server_tag_value =
+                    auth_event.get_tag_content(TagKind::Custom(Cow::from("server")));
 
-                match (server_tag, x_tag) {
-                    (Some(server_tag), _) => {
-                        // Verify that the server tag matches the URL of this server
-                        if let Some(server_url) = server_tag.get(1) {
-                            if server_url != &app_state.config.server_url {
-                                let json = Json(ErrorResponse {
-                                    message: "Invalid server tag".to_string(),
-                                });
-                                return (StatusCode::UNAUTHORIZED, json).into_response();
-                            }
-                        } else {
+                match (x_tag_value, server_tag_value) {
+                    (Some(x_tag_value), _) => {
+                        // Verify that the x tag matches the SHA-256 hash of the blob being retrieved
+                        if file_hash != x_tag_value {
                             let json = Json(ErrorResponse {
-                                message: "Missing server tag value".to_string(),
+                                message: "File hash mismatch in path and authorization event"
+                                    .to_string(),
                             });
                             return (StatusCode::UNAUTHORIZED, json).into_response();
                         }
                     }
-                    (_, Some(x_tag)) => {
-                        // Verify that the x tag matches the SHA-256 hash of the blob being retrieved
-                        if let Some(file_hash_tag) = x_tag.get(1) {
-                            if file_hash != file_hash_tag.clone() {
-                                let json = Json(ErrorResponse {
-                                    message: "File hash mismatch in path and authorization event"
-                                        .to_string(),
-                                });
-                                return (StatusCode::UNAUTHORIZED, json).into_response();
-                            }
-                        } else {
+                    (_, Some(server_tag_value)) => {
+                        // Verify that the server tag matches the URL of this server
+                        if server_tag_value != app_state.config.server_url {
                             let json = Json(ErrorResponse {
-                                message: "Missing x tag value".to_string(),
+                                message: "Invalid server tag".to_string(),
                             });
                             return (StatusCode::UNAUTHORIZED, json).into_response();
                         }
@@ -158,7 +170,7 @@ pub async fn get_blob_handler(
             "SELECT * FROM blob_descriptors WHERE sha256 = ? AND pubkey = ?",
         )
         .bind(&file_hash)
-        .bind(auth_event.unwrap().pubkey)
+        .bind(auth_event.unwrap().pubkey.to_hex())
         .fetch_optional(&app_state.pool)
         .await
         .unwrap();
@@ -257,9 +269,19 @@ pub async fn list_blobs_handler(
     AuthHeader(auth_event): AuthHeader,
 ) -> impl IntoResponse {
     if app_state.config.list.require_auth {
+        let path_public_key = match PublicKey::from_hex(&pubkey) {
+            Ok(pubkey) => pubkey,
+            Err(err) => {
+                error!("{}", err);
+                let json = Json(ErrorResponse {
+                    message: "Unable to parse public key in path".to_string(),
+                });
+                return (StatusCode::BAD_REQUEST, json).into_response();
+            }
+        };
         match auth_event {
             Some(ref auth_event) => {
-                if auth_event.pubkey != pubkey {
+                if auth_event.pubkey != path_public_key {
                     let json = Json(ErrorResponse {
                         message: "Public key mismatch in authorization event and url path"
                             .to_string(),
@@ -365,7 +387,7 @@ pub async fn upload_blob_handler(
     }
 
     // Check if public key is allowed to upload to the server
-    if let Err(e) = is_public_key_allowed_to_upload(&app_state.config, auth_event.pubkey.as_str()) {
+    if let Err(e) = is_public_key_allowed_to_upload(&app_state.config, &auth_event.pubkey) {
         let json = Json(ErrorResponse {
             message: e.to_string(),
         });
@@ -416,7 +438,7 @@ pub async fn upload_blob_handler(
         .bind(blob_descriptor.size)
         .bind(&blob_descriptor.r#type)
         .bind(blob_descriptor.uploaded)
-        .bind(&auth_event.pubkey)
+        .bind(auth_event.pubkey.to_hex())
         .execute(&app_state.pool)
         .await;
 
@@ -487,23 +509,30 @@ pub async fn delete_blob_handler(
         }
     }
 
-    let auth_event_file_hash = extract_file_hash_from_auth_event(&auth_event);
-    if auth_event_file_hash.is_empty() {
-        let json = Json(ErrorResponse {
-            message: "File hash not provided in the authorization event tags".to_string(),
-        });
-        return (StatusCode::UNAUTHORIZED, json).into_response();
-    } else if auth_event_file_hash != path_file_hash {
-        let json = Json(ErrorResponse {
-            message: "Mismatch between hash in url path and authorization event".to_string(),
-        });
-        return (StatusCode::BAD_REQUEST, json).into_response();
-    }
+    let auth_event_file_hash = match extract_file_hash_from_auth_event(&auth_event) {
+        Some(auth_event_file_hash) => {
+            if auth_event_file_hash != path_file_hash {
+                let json = Json(ErrorResponse {
+                    message: "Mismatch between hash in url path and authorization event"
+                        .to_string(),
+                });
+                return (StatusCode::BAD_REQUEST, json).into_response();
+            } else {
+                auth_event_file_hash
+            }
+        }
+        None => {
+            let json = Json(ErrorResponse {
+                message: "File hash not provided in the authorization event tags".to_string(),
+            });
+            return (StatusCode::UNAUTHORIZED, json).into_response();
+        }
+    };
 
     // Ensure the file exists in the database
     match sqlx::query("SELECT 1 FROM blob_descriptors WHERE sha256 = ? AND pubkey = ?")
-        .bind(&auth_event_file_hash)
-        .bind(&auth_event.pubkey)
+        .bind(auth_event_file_hash)
+        .bind(auth_event.pubkey.to_hex())
         .fetch_optional(&app_state.pool)
         .await
     {
@@ -526,7 +555,7 @@ pub async fn delete_blob_handler(
     // Delete file blob descriptor from the sqlite database
     match sqlx::query("DELETE FROM blob_descriptors WHERE sha256 = ? AND pubkey = ?")
         .bind(&path_file_hash)
-        .bind(&auth_event.pubkey)
+        .bind(auth_event.pubkey.to_hex())
         .execute(&app_state.pool)
         .await
     {
@@ -544,7 +573,7 @@ pub async fn delete_blob_handler(
     match sqlx::query(
         "UPDATE file_references SET reference_count = reference_count - 1 WHERE sha256 = ?",
     )
-    .bind(&auth_event_file_hash)
+    .bind(auth_event_file_hash)
     .execute(&app_state.pool)
     .await
     {
@@ -618,14 +647,16 @@ pub async fn mirror_blob_handler(
         }
     }
 
-    let event_file_hash = extract_file_hash_from_auth_event(&auth_event);
-    if event_file_hash.is_empty() {
-        let error_response = ErrorResponse {
-            message: "Invalid file hash in authorization event".to_string(),
-        };
-        let json = Json(error_response);
-        return (StatusCode::BAD_REQUEST, json).into_response();
-    }
+    match extract_file_hash_from_auth_event(&auth_event) {
+        Some(event_file_hash) => event_file_hash,
+        None => {
+            let error_response = ErrorResponse {
+                message: "Invalid file hash in authorization event".to_string(),
+            };
+            let json = Json(error_response);
+            return (StatusCode::BAD_REQUEST, json).into_response();
+        }
+    };
 
     let client = Client::new();
     let response = match client.get(&mirror_request.url).send().await {
@@ -703,7 +734,7 @@ pub async fn mirror_blob_handler(
         .bind(blob_descriptor.size)
         .bind(&blob_descriptor.r#type)
         .bind(blob_descriptor.uploaded)
-        .bind(&auth_event.pubkey)
+        .bind(auth_event.pubkey.to_hex())
         .execute(&app_state.pool)
         .await;
 

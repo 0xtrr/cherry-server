@@ -1,7 +1,7 @@
+use crate::config::{Config, UploadFilterListMode};
+use nostr_sdk::PublicKey;
 use std::fmt;
 use std::fmt::Formatter;
-
-use crate::config::{Config, UploadFilterListMode};
 
 #[derive(Debug)]
 pub enum Error {
@@ -33,7 +33,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub fn is_public_key_allowed_to_upload(config: &Config, pubkey: &str) -> Result<(), Error> {
+pub fn is_public_key_allowed_to_upload(config: &Config, pubkey: &PublicKey) -> Result<(), Error> {
     // Only check if filter is enabled
     if config.upload.public_key_filter.enabled {
         match config.upload.public_key_filter.mode {
