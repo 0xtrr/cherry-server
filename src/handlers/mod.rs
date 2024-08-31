@@ -227,6 +227,7 @@ pub async fn get_blob_handler(
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
+        .header("Cache-Control", "max-age=31536000, immutable")
         .body(file_contents.into())
         .unwrap()
 }
