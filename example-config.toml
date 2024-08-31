@@ -1,7 +1,8 @@
 # Basic settings
 database_directory = './db'
 files_directory = './blobs'
-hostname = '0.0.0.0:3030' # Set to entire url (e.g. https://cdn.oxtr.dev or http://localhost:3030). Used to set the URL in a blob descriptor.
+server_url = 'https://cdn.oxtr.dev' # Set to entire URL without trailing /. Used to set the URL in a blob descriptor.
+host = 'localhost:3030' # hostname:port to bind on
 
 # Get blob settings
 [get]
