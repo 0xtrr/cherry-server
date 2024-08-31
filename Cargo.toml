@@ -29,3 +29,4 @@ url = "2.5.2"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
 clap = { version = "4.5.16", features = ["derive"] }
+nostr-sdk = "0.34.0"

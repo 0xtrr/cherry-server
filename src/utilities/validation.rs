@@ -1,15 +1,14 @@
 use std::fmt;
 use std::fmt::Formatter;
 
-use axum::body::Bytes;
-
-use crate::handlers::AuthEvent;
 use crate::utilities::get_sha256_hash;
+use axum::body::Bytes;
+use nostr_sdk::{Event, Kind, SingleLetterTag, TagKind, Timestamp};
 
 #[derive(Debug)]
 pub enum Error {
     // Kind number
-    InvalidKind(u64),
+    InvalidKind(Kind),
     AuthEventExpired,
     ExpirationTagMissing,
     MissingActionTag,
@@ -18,7 +17,7 @@ pub enum Error {
     FilehashTagMissing,
     // Expected filehash (from auth event), actual filehash
     FileHashMismatch(String, String),
-    InvalidCreatedAt(u64),
+    InvalidCreatedAt(Timestamp),
 }
 
 impl fmt::Display for Error {
@@ -37,25 +36,19 @@ impl fmt::Display for Error {
 }
 
 /// Validates the authorization event
-pub fn validate_auth_event(auth_event: &AuthEvent, action: &str) -> Result<(), Error> {
+pub fn validate_auth_event(auth_event: &Event, action: &str) -> Result<(), Error> {
     // Verify kind number
-    if auth_event.kind != 24242 {
+    if auth_event.kind != Kind::Custom(24242) {
         return Err(Error::InvalidKind(auth_event.kind));
     }
 
     // Verify that created_at is in the past
-    if auth_event.created_at > chrono::Utc::now().timestamp() as u64 {
+    if auth_event.created_at > Timestamp::now() {
         return Err(Error::InvalidCreatedAt(auth_event.created_at));
     }
 
     // Verify that the event hasn't expired
-    match auth_event.tags.iter().find_map(|tag| {
-        if tag[0] == "expiration" {
-            tag.get(1)
-        } else {
-            None
-        }
-    }) {
+    match auth_event.get_tag_content(TagKind::Expiration) {
         Some(expiration) => {
             let expiration: u64 = expiration.parse().unwrap_or(0);
             if expiration < chrono::Utc::now().timestamp() as u64 {
@@ -69,12 +62,14 @@ pub fn validate_auth_event(auth_event: &AuthEvent, action: &str) -> Result<(), E
     }
 
     // Verify that a t-tag exists and has the correct value
-    if let Some(tag) = auth_event.tags.iter().find(|tag| tag[0] == "t") {
-        if tag.len() > 1 && tag[1] == action {
+    if let Some(t_tag_value) = auth_event.get_tag_content(TagKind::SingleLetter(
+        SingleLetterTag::from_char('t').unwrap(),
+    )) {
+        if t_tag_value == action {
             Ok(())
         } else {
             Err(Error::IncorrectAction(
-                tag[1].to_string(),
+                String::from(t_tag_value),
                 action.to_string(),
             ))
         }
@@ -86,11 +81,13 @@ pub fn validate_auth_event(auth_event: &AuthEvent, action: &str) -> Result<(), E
 /// Takes the auth header and the blob bytes.
 ///
 /// If successful, returns the file hash. Else, returns an error.
-pub fn validate_file_hash(auth_event: &AuthEvent, body: &Bytes) -> Result<String, Error> {
-    let file_hash = extract_file_hash_from_auth_event(auth_event);
-    if file_hash.is_empty() {
-        return Err(Error::FilehashTagMissing);
-    }
+pub fn validate_file_hash(auth_event: &Event, body: &Bytes) -> Result<String, Error> {
+    let file_hash = match extract_file_hash_from_auth_event(auth_event) {
+        Some(file_hash) => String::from(file_hash),
+        None => {
+            return Err(Error::FilehashTagMissing);
+        }
+    };
 
     let computed_hash = get_sha256_hash(body);
 
@@ -101,10 +98,8 @@ pub fn validate_file_hash(auth_event: &AuthEvent, body: &Bytes) -> Result<String
 }
 
 /// Extracts the file hash from the auth event tags
-pub fn extract_file_hash_from_auth_event(auth_event: &AuthEvent) -> String {
-    if let Some(tag) = auth_event.tags.iter().find(|tag| tag[0] == "x") {
-        tag.get(1).cloned().unwrap_or_default()
-    } else {
-        String::new()
-    }
+pub fn extract_file_hash_from_auth_event(auth_event: &Event) -> Option<&str> {
+    auth_event.get_tag_content(TagKind::SingleLetter(
+        SingleLetterTag::from_char('x').unwrap(),
+    ))
 }

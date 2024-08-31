@@ -117,7 +117,10 @@ async fn main() {
 
     // Configure the API routes
     let app = Router::new()
-        .route("/", get(|| async { Html(include_str!("handlers/html/index.html")) }))
+        .route(
+            "/",
+            get(|| async { Html(include_str!("handlers/html/index.html")) }),
+        )
         .route(
             "/:hash",
             get(get_blob_handler)
