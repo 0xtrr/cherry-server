@@ -65,9 +65,11 @@ where
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        let auth_header = parts.headers.get("Authorization").ok_or_else(|| {
-            unauthorized_error_response("Missing Authorization header".to_string())
-        })?;
+        let auth_header = if let Some(auth_header) = parts.headers.get("Authorization") {
+            auth_header
+        } else {
+            return Ok(AuthHeader(None));
+        };
 
         let auth_str = auth_header
             .to_str()
