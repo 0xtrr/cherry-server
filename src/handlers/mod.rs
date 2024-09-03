@@ -123,44 +123,42 @@ pub async fn get_blob_handler(
                     return (StatusCode::UNAUTHORIZED, json).into_response();
                 }
 
-                // Verify that the event contains either a server tag or an x tag
-                let x_tag_value = auth_event.get_tag_content(TagKind::SingleLetter(
-                    SingleLetterTag::from_char('x').unwrap(),
+                // Get all x-tags (file hash) from the authorization event
+                let x_tags_values = auth_event.get_tags_content(TagKind::SingleLetter(
+                    SingleLetterTag::from_char('x').unwrap()
                 ));
+
+                // Get server tag from the authorization event
                 let server_tag_value =
                     auth_event.get_tag_content(TagKind::Custom(Cow::from("server")));
 
-                match (x_tag_value, server_tag_value) {
-                    (Some(x_tag_value), _) => {
-                        // Verify that the x tag matches the SHA-256 hash of the blob being retrieved
-                        if file_hash != x_tag_value {
-                            let json = Json(ErrorResponse {
-                                message: "File hash mismatch in path and authorization event"
-                                    .to_string(),
-                            });
-                            return (StatusCode::UNAUTHORIZED, json).into_response();
-                        }
-                    }
-                    (_, Some(server_tag_value)) => {
-                        // Verify that the server tag matches the URL of this server
-                        if server_tag_value != app_state.config.server_url {
-                            let json = Json(ErrorResponse {
-                                message: "Invalid server tag".to_string(),
-                            });
-                            return (StatusCode::UNAUTHORIZED, json).into_response();
-                        }
-                    }
-                    (None, None) => {
+                // Verify that the event contains either a server tag or a matching x tag
+                if x_tags_values.len() > 0 {
+                    if !x_tags_values.contains(&file_hash.as_str()) {
                         let json = Json(ErrorResponse {
-                            message: "Missing server or x tag in authorization event".to_string(),
+                            message: "Authorization event does not contain a file hash corresponding to the hash specified in the URL path"
+                                .to_string(),
                         });
                         return (StatusCode::UNAUTHORIZED, json).into_response();
                     }
+                } else if let Some(server_tag_value) = server_tag_value {
+                    // Verify that the server tag matches the URL of this server
+                    if server_tag_value != app_state.config.server_url {
+                        let json = Json(ErrorResponse {
+                            message: "Invalid server tag".to_string(),
+                        });
+                        return (StatusCode::UNAUTHORIZED, json).into_response();
+                    }
+                } else {
+                    let json = Json(ErrorResponse {
+                        message: "Missing server or x tag in authorization event".to_string(),
+                    });
+                    return (StatusCode::UNAUTHORIZED, json).into_response();
                 }
             }
             None => {
                 let json = Json(ErrorResponse {
-                    message: "Missing authorization event".to_string(),
+                    message: "Authorization event required to access this resource".to_string(),
                 });
                 return (StatusCode::UNAUTHORIZED, json).into_response();
             }
@@ -171,11 +169,11 @@ pub async fn get_blob_handler(
         let result = query_as::<_, BlobDescriptor>(
             "SELECT * FROM blob_descriptors WHERE sha256 = ? AND pubkey = ?",
         )
-        .bind(&file_hash)
-        .bind(auth_event.unwrap().pubkey.to_hex())
-        .fetch_optional(&app_state.pool)
-        .await
-        .unwrap();
+            .bind(&file_hash)
+            .bind(auth_event.unwrap().pubkey.to_hex())
+            .fetch_optional(&app_state.pool)
+            .await
+            .unwrap();
 
         if result.is_none() {
             return (StatusCode::NOT_FOUND).into_response();
@@ -452,9 +450,9 @@ pub async fn upload_blob_handler(
                 "INSERT INTO file_references (sha256, reference_count) VALUES (?, 1)
          ON CONFLICT(sha256) DO UPDATE SET reference_count = reference_count + 1",
             )
-            .bind(&file_hash)
-            .execute(&app_state.pool)
-            .await;
+                .bind(&file_hash)
+                .execute(&app_state.pool)
+                .await;
 
             if let Err(e) = reference_update_result {
                 let error_message = ErrorResponse {
@@ -576,9 +574,9 @@ pub async fn delete_blob_handler(
     match sqlx::query(
         "UPDATE file_references SET reference_count = reference_count - 1 WHERE sha256 = ?",
     )
-    .bind(auth_event_file_hash)
-    .execute(&app_state.pool)
-    .await
+        .bind(auth_event_file_hash)
+        .execute(&app_state.pool)
+        .await
     {
         Ok(_) => {}
         Err(e) => {
