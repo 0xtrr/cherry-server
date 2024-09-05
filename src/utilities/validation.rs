@@ -15,8 +15,8 @@ pub enum Error {
     // Expected action, Actual/provided action
     IncorrectAction(String, String),
     FilehashTagMissing,
-    // Expected filehash (from auth event), actual filehash
-    FileHashMismatch(String, String),
+    // Actual filehash
+    FileHashMissing(String),
     InvalidCreatedAt(Timestamp),
 }
 
@@ -29,7 +29,7 @@ impl fmt::Display for Error {
             Error::MissingActionTag => write!(f, "Missing action tag (t)"),
             Error::IncorrectAction(input_action, expected_action) => write!(f, "Incorrect action {}, expected {}", input_action, expected_action),
             Error::FilehashTagMissing => write!(f, "Missing filehash tag (x)"),
-            Error::FileHashMismatch(expected, actual) => write!(f, "File hash mismatch. Authorization event specified {}, but computed file hash was {}", expected, actual),
+            Error::FileHashMissing(actual) => write!(f, "Missing filehash tag (x) for hash {}", actual),
             Error::InvalidCreatedAt(created_at) => write!(f, "Invalid created_at: {}", created_at),
         }
     }
@@ -78,28 +78,29 @@ pub fn validate_auth_event(auth_event: &Event, action: &str) -> Result<(), Error
     }
 }
 
+/// Validates hash against authorization event.
+/// Returns the passed-in hash if it is present, an error otherwise.
+pub fn validate_auth_event_x(auth_event: &Event, hash: &str) -> Result<String, Error> {
+    let x_tags = auth_event.get_tags_content(TagKind::SingleLetter(
+            SingleLetterTag::from_char('x').unwrap(),
+        ));
+
+    if x_tags.is_empty() {
+        Err(Error::FilehashTagMissing)
+    } else {
+        if x_tags.iter().any(|value| value == &hash) {
+            Ok(hash.to_owned())
+        } else {
+            Err(Error::FileHashMissing(hash.to_owned()))
+        }
+    }
+}
+
 /// Takes the auth header and the blob bytes.
 ///
 /// If successful, returns the file hash. Else, returns an error.
 pub fn validate_file_hash(auth_event: &Event, body: &Bytes) -> Result<String, Error> {
-    let file_hash = match extract_file_hash_from_auth_event(auth_event) {
-        Some(file_hash) => String::from(file_hash),
-        None => {
-            return Err(Error::FilehashTagMissing);
-        }
-    };
-
     let computed_hash = get_sha256_hash(body);
 
-    if computed_hash.clone() != file_hash {
-        return Err(Error::FileHashMismatch(file_hash, computed_hash));
-    }
-    Ok(computed_hash.clone())
-}
-
-/// Extracts the file hash from the auth event tags
-pub fn extract_file_hash_from_auth_event(auth_event: &Event) -> Option<&str> {
-    auth_event.get_tag_content(TagKind::SingleLetter(
-        SingleLetterTag::from_char('x').unwrap(),
-    ))
+    validate_auth_event_x(auth_event, &computed_hash)
 }

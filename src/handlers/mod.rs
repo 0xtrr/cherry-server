@@ -8,7 +8,7 @@ use crate::utilities::file::{
     delete_blob_from_filesystem, get_blob_from_filesystem, write_blob_to_file,
 };
 use crate::utilities::validation::{
-    extract_file_hash_from_auth_event, validate_auth_event, validate_file_hash,
+    validate_auth_event, validate_auth_event_x, validate_file_hash,
 };
 use crate::utilities::{bytes_to_mb, get_current_unix_timestamp, split_filehash_and_filetype};
 use crate::{utilities, AppState, BlobDescriptor};
@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose;
 use base64::Engine;
-use nostr_sdk::{Event, PublicKey, SingleLetterTag, TagKind};
+use nostr_sdk::{Event, PublicKey, TagKind};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::query_as;
@@ -123,23 +123,14 @@ pub async fn get_blob_handler(
                     return (StatusCode::UNAUTHORIZED, json).into_response();
                 }
 
-                // Verify that the event contains either a server tag or an x tag
-                let x_tag_value = auth_event.get_tag_content(TagKind::SingleLetter(
-                    SingleLetterTag::from_char('x').unwrap(),
-                ));
+                // Verify that the event contains either a server tag or a matching x tag
+                let x_tag_match = validate_auth_event_x(auth_event, &file_hash);
                 let server_tag_value =
                     auth_event.get_tag_content(TagKind::Custom(Cow::from("server")));
 
-                match (x_tag_value, server_tag_value) {
-                    (Some(x_tag_value), _) => {
-                        // Verify that the x tag matches the SHA-256 hash of the blob being retrieved
-                        if file_hash != x_tag_value {
-                            let json = Json(ErrorResponse {
-                                message: "File hash mismatch in path and authorization event"
-                                    .to_string(),
-                            });
-                            return (StatusCode::UNAUTHORIZED, json).into_response();
-                        }
+                match (x_tag_match, server_tag_value) {
+                    (Ok(_), _) => {
+                        // Matching file hash was present in x tags, fall through
                     }
                     (_, Some(server_tag_value)) => {
                         // Verify that the server tag matches the URL of this server
@@ -150,9 +141,9 @@ pub async fn get_blob_handler(
                             return (StatusCode::UNAUTHORIZED, json).into_response();
                         }
                     }
-                    (None, None) => {
+                    (_, None) => {
                         let json = Json(ErrorResponse {
-                            message: "Missing server or x tag in authorization event".to_string(),
+                            message: "Missing server or matching x tag in authorization event".to_string(),
                         });
                         return (StatusCode::UNAUTHORIZED, json).into_response();
                     }
@@ -512,29 +503,16 @@ pub async fn delete_blob_handler(
         }
     }
 
-    let auth_event_file_hash = match extract_file_hash_from_auth_event(&auth_event) {
-        Some(auth_event_file_hash) => {
-            if auth_event_file_hash != path_file_hash {
-                let json = Json(ErrorResponse {
-                    message: "Mismatch between hash in url path and authorization event"
-                        .to_string(),
-                });
-                return (StatusCode::BAD_REQUEST, json).into_response();
-            } else {
-                auth_event_file_hash
-            }
-        }
-        None => {
-            let json = Json(ErrorResponse {
-                message: "File hash not provided in the authorization event tags".to_string(),
-            });
-            return (StatusCode::UNAUTHORIZED, json).into_response();
-        }
-    };
+    if let Err(err) = validate_auth_event_x(&auth_event, &path_file_hash) {
+        let json = Json(ErrorResponse {
+            message: err.to_string(),
+        });
+        return (StatusCode::UNAUTHORIZED, json).into_response();
+    }
 
     // Ensure the file exists in the database
     match sqlx::query("SELECT 1 FROM blob_descriptors WHERE sha256 = ? AND pubkey = ?")
-        .bind(auth_event_file_hash)
+        .bind(&path_file_hash)
         .bind(auth_event.pubkey.to_hex())
         .fetch_optional(&app_state.pool)
         .await
@@ -576,7 +554,7 @@ pub async fn delete_blob_handler(
     match sqlx::query(
         "UPDATE file_references SET reference_count = reference_count - 1 WHERE sha256 = ?",
     )
-    .bind(auth_event_file_hash)
+    .bind(&path_file_hash)
     .execute(&app_state.pool)
     .await
     {
@@ -649,17 +627,6 @@ pub async fn mirror_blob_handler(
             return (StatusCode::UNAUTHORIZED, json).into_response();
         }
     }
-
-    match extract_file_hash_from_auth_event(&auth_event) {
-        Some(event_file_hash) => event_file_hash,
-        None => {
-            let error_response = ErrorResponse {
-                message: "Invalid file hash in authorization event".to_string(),
-            };
-            let json = Json(error_response);
-            return (StatusCode::BAD_REQUEST, json).into_response();
-        }
-    };
 
     let client = Client::new();
     let response = match client.get(&mirror_request.url).send().await {
