@@ -12,10 +12,9 @@ keywords = ["blossom", "server"]
 
 [dependencies]
 axum = { version = "0.7.5", features = ["multipart"] }
-hyper = { version = "1.4.1", features = ["full"] }
 serde = { version = "1.0.204", features = ["derive"] }
 serde_json = "1.0.120"
-tokio = { version = "1.38.0", features = ["full"] }
+tokio = { version = "1.38.0", features = ["full", "test-util"] }
 tower-http = { version = "0.5.2", features = ["cors"] }
 chrono = "0.4.38"
 sha2 = "0.10.8"
@@ -25,8 +24,11 @@ async-trait = "0.1.81"
 sqlx = { version = "0.7.4", features = ["runtime-tokio-rustls", "sqlite", "macros"] }
 toml = "0.8.15"
 reqwest = { version = "0.12.5", features = ["json"] }
-url = "2.5.2"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
 clap = { version = "4.5.16", features = ["derive"] }
 nostr-sdk = "0.34.0"
+http-body-util = "0.1.2"
+
+[dev-dependencies]
+tower = { version = "0.5.1", features = ["util"] }

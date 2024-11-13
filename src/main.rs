@@ -2,19 +2,11 @@ use std::process::exit;
 
 use crate::config::Config;
 use crate::db::set_up_sqlite_db;
-use crate::handlers::{
-    delete_blob_handler, get_blob_handler, has_blob_handler, list_blobs_handler,
-    mirror_blob_handler, upload_blob_handler,
-};
+use crate::handlers::create_router;
 use crate::utilities::file::create_directory_if_not_exists;
-use axum::http::Method;
-use axum::response::Html;
-use axum::routing::{get, put};
-use axum::Router;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Sqlite};
-use tower_http::cors::Any;
 use tracing::log::{debug, error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -103,12 +95,6 @@ async fn main() {
         }
     };
 
-    // Configure CORS policy
-    let cors = tower_http::cors::CorsLayer::new()
-        .allow_origin(Any)
-        .allow_headers(Any)
-        .allow_methods(vec![Method::GET, Method::PUT, Method::DELETE, Method::HEAD]);
-
     // Configure app state
     let app_state = AppState {
         config: config.clone(),
@@ -116,22 +102,7 @@ async fn main() {
     };
 
     // Configure the API routes
-    let app = Router::new()
-        .route(
-            "/",
-            get(|| async { Html(include_str!("handlers/html/index.html")) }),
-        )
-        .route(
-            "/:hash",
-            get(get_blob_handler)
-                .head(has_blob_handler)
-                .delete(delete_blob_handler),
-        )
-        .route("/upload", put(upload_blob_handler))
-        .route("/list/:pubkey", get(list_blobs_handler))
-        .route("/mirror", put(mirror_blob_handler))
-        .layer(cors)
-        .with_state(app_state);
+    let app = create_router(app_state).await;
 
     // Set up TCP listener
     debug!("Binding to {}", &config.host);
