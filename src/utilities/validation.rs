@@ -25,11 +25,20 @@ impl fmt::Display for Error {
         match self {
             Error::InvalidKind(kind) => write!(f, "Invalid kind: {}", kind),
             Error::AuthEventExpired => write!(f, "Authorization event expired"),
-            Error::ExpirationTagMissing => write!(f, "Required expiration tag missing from authorization event"),
+            Error::ExpirationTagMissing => write!(
+                f,
+                "Required expiration tag missing from authorization event"
+            ),
             Error::MissingActionTag => write!(f, "Missing action tag (t)"),
-            Error::IncorrectAction(input_action, expected_action) => write!(f, "Incorrect action {}, expected {}", input_action, expected_action),
+            Error::IncorrectAction(input_action, expected_action) => write!(
+                f,
+                "Incorrect action {}, expected {}",
+                input_action, expected_action
+            ),
             Error::FilehashTagMissing => write!(f, "Missing filehash tag (x)"),
-            Error::FileHashMissing(actual) => write!(f, "Missing filehash tag (x) for hash {}", actual),
+            Error::FileHashMissing(actual) => {
+                write!(f, "Missing filehash tag (x) for hash {}", actual)
+            }
             Error::InvalidCreatedAt(created_at) => write!(f, "Invalid created_at: {}", created_at),
         }
     }
@@ -82,17 +91,15 @@ pub fn validate_auth_event(auth_event: &Event, action: &str) -> Result<(), Error
 /// Returns the passed-in hash if it is present, an error otherwise.
 pub fn validate_auth_event_x(auth_event: &Event, hash: &str) -> Result<String, Error> {
     let x_tags = auth_event.get_tags_content(TagKind::SingleLetter(
-            SingleLetterTag::from_char('x').unwrap(),
-        ));
+        SingleLetterTag::from_char('x').unwrap(),
+    ));
 
     if x_tags.is_empty() {
         Err(Error::FilehashTagMissing)
+    } else if x_tags.iter().any(|value| value == &hash) {
+        Ok(hash.to_owned())
     } else {
-        if x_tags.iter().any(|value| value == &hash) {
-            Ok(hash.to_owned())
-        } else {
-            Err(Error::FileHashMissing(hash.to_owned()))
-        }
+        Err(Error::FileHashMissing(hash.to_owned()))
     }
 }
 
