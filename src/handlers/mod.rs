@@ -148,19 +148,20 @@ pub async fn get_blob_handler(
                 }
 
                 // Verify x/server tag
-                let has_server_tag = &auth_event
-                    .tags
-                    .iter()
-                    .any(|tag| tag.kind() == TagKind::custom("server") && tag.content().unwrap() == app_state.config.server_url);
+                let has_server_tag = &auth_event.tags.iter().any(|tag| {
+                    tag.kind() == TagKind::custom("server")
+                        && tag.content().unwrap() == app_state.config.server_url
+                });
 
-                let has_x_tag = &auth_event
-                    .tags
-                    .iter()
-                    .any(|tag| tag.kind() == TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()) && tag.content().unwrap() == file_hash);
+                let has_x_tag = &auth_event.tags.iter().any(|tag| {
+                    tag.kind() == TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap())
+                        && tag.content().unwrap() == file_hash
+                });
 
                 if !has_server_tag && !has_x_tag {
                     let json = Json(ErrorResponse {
-                        message: "No matching x tag or server tag in authorization event".to_string(),
+                        message: "No matching x tag or server tag in authorization event"
+                            .to_string(),
                     });
                     return (StatusCode::UNAUTHORIZED, json).into_response();
                 }
@@ -1063,7 +1064,6 @@ mod tests {
 
         assert!(result.is_none());
     }
-
 
     /// Sets up a test `AppState` instance with a temporary database and file directory.
     ///
