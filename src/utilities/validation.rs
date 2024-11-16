@@ -57,7 +57,7 @@ pub fn validate_auth_event(auth_event: &Event, action: &str) -> Result<(), Error
     }
 
     // Verify that the event hasn't expired
-    match auth_event.tags.find(TagKind::Expiration) {
+    match auth_event.tags.clone().find(TagKind::Expiration) {
         Some(expiration) => {
             let expiration_value: u64 = match expiration.content() {
                 None => 0,
@@ -74,19 +74,20 @@ pub fn validate_auth_event(auth_event: &Event, action: &str) -> Result<(), Error
     }
 
     // Verify that a t-tag exists and has the correct value
-    if let Some(t_tag_value) = auth_event.get_tag_content(TagKind::SingleLetter(
+    match auth_event.tags.find(TagKind::SingleLetter(
         SingleLetterTag::from_char('t').unwrap(),
     )) {
-        if t_tag_value == action {
-            Ok(())
-        } else {
-            Err(Error::IncorrectAction(
-                String::from(t_tag_value),
-                action.to_string(),
-            ))
+        Some(action_tag) => {
+            if action_tag.content().unwrap() == action {
+                Ok(())
+            } else {
+                Err(Error::IncorrectAction(
+                    action.to_string(),
+                    action_tag.content().unwrap().to_string(),
+                ))
+            }
         }
-    } else {
-        Err(Error::MissingActionTag)
+        None => Err(Error::MissingActionTag),
     }
 }
 
@@ -96,7 +97,7 @@ pub fn validate_auth_event_x(auth_event: &Event, hash: &str) -> Result<String, E
     // Fetch all x tags from authorization event
     let x_tags: Vec<Tag> = auth_event
         .tags
-        .to_owned()
+        .clone()
         .into_iter()
         .filter(|tag| tag.kind() == TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()))
         .filter(|tag| tag.content().is_some())
