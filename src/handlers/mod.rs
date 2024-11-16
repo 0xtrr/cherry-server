@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -21,7 +20,7 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use base64::engine::general_purpose;
 use base64::Engine;
-use nostr_sdk::{Event, PublicKey, TagKind};
+use nostr_sdk::{Event, PublicKey, SingleLetterTag, TagKind};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::query_as;
@@ -92,8 +91,8 @@ where
 
         match serde_json::from_slice::<Event>(&decoded_event) {
             Ok(event) => match event.verify_signature() {
-                Ok(_) => Ok(AuthHeader(Some(event))),
-                Err(_) => Err(unauthorized_error_response(
+                true => Ok(AuthHeader(Some(event))),
+                false => Err(unauthorized_error_response(
                     "Invalid signature in authorization event".to_string(),
                 )),
             },
@@ -148,31 +147,22 @@ pub async fn get_blob_handler(
                     return (StatusCode::UNAUTHORIZED, json).into_response();
                 }
 
-                // Verify that the event contains either a server tag or a matching x tag
-                let x_tag_match = validate_auth_event_x(auth_event, &file_hash);
-                let server_tag_value =
-                    auth_event.get_tag_content(TagKind::Custom(Cow::from("server")));
+                // Verify x/server tag
+                let has_server_tag = &auth_event
+                    .tags
+                    .iter()
+                    .any(|tag| tag.kind() == TagKind::custom("server") && tag.content().unwrap() == app_state.config.server_url);
 
-                match (x_tag_match, server_tag_value) {
-                    (Ok(_), _) => {
-                        // Matching file hash was present in x tags, fall through
-                    }
-                    (_, Some(server_tag_value)) => {
-                        // Verify that the server tag matches the URL of this server
-                        if server_tag_value != app_state.config.server_url {
-                            let json = Json(ErrorResponse {
-                                message: "Invalid server tag".to_string(),
-                            });
-                            return (StatusCode::UNAUTHORIZED, json).into_response();
-                        }
-                    }
-                    (_, None) => {
-                        let json = Json(ErrorResponse {
-                            message: "Missing server or matching x tag in authorization event"
-                                .to_string(),
-                        });
-                        return (StatusCode::UNAUTHORIZED, json).into_response();
-                    }
+                let has_x_tag = &auth_event
+                    .tags
+                    .iter()
+                    .any(|tag| tag.kind() == TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()) && tag.content().unwrap() == file_hash);
+
+                if !has_server_tag && !has_x_tag {
+                    let json = Json(ErrorResponse {
+                        message: "No matching x tag or server tag in authorization event".to_string(),
+                    });
+                    return (StatusCode::UNAUTHORIZED, json).into_response();
                 }
             }
             None => {
@@ -1134,7 +1124,7 @@ mod tests {
 
     fn generate_blossom_auth_header(keys: Keys, action: String, tags: Vec<Tag>) -> String {
         let json_event = EventBuilder::new(Kind::Custom(24242), action, tags)
-            .to_event(&keys)
+            .sign_with_keys(&keys)
             .unwrap()
             .as_json();
         base64::engine::general_purpose::STANDARD.encode(json_event)
