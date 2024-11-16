@@ -44,7 +44,26 @@ impl fmt::Display for Error {
     }
 }
 
-/// Validates the authorization event
+/// Validates an authorization event.
+///
+/// This function checks if an authorization event is valid by verifying the following conditions:
+///
+/// *   The event kind is 24242.
+/// *   The `created_at` timestamp is in the past.
+/// *   The event has not expired (i.e., the `expiration` tag is present and its value is a Unix timestamp in the future).
+/// *   A `t` tag exists and its value matches the provided `action`.
+///
+/// If any of these conditions are not met, the function returns an error.
+///
+/// # Arguments
+///
+/// *   `auth_event`: The authorization event to validate.
+/// *   `action`: The expected value of the `t` tag.
+///
+/// # Returns
+///
+/// *   `Ok(())` if the authorization event is valid.
+/// *   `Err(Error)` if the authorization event is invalid.
 pub fn validate_auth_event(auth_event: &Event, action: &str) -> Result<(), Error> {
     // Verify kind number
     if auth_event.kind != Kind::Custom(24242) {
@@ -91,8 +110,21 @@ pub fn validate_auth_event(auth_event: &Event, action: &str) -> Result<(), Error
     }
 }
 
-/// Validates hash against authorization event.
-/// Returns the passed-in hash if it is present, an error otherwise.
+/// Validates an authorization event by checking for a matching x tag.
+///
+/// This function checks if an authorization event contains an x tag that matches the provided `hash`.
+///
+/// # Arguments
+///
+/// *   `auth_event`: The authorization event to validate.
+/// *   `hash`: The expected hash value to match against the x tags in the authorization event.
+///
+/// # Returns
+///
+/// *   `Ok(hash)` if the authorization event contains an x tag that matches the provided `hash`.
+/// *   `Err(Error::FilehashTagMissing)` if the authorization event does not contain any x tags.
+/// *   `Err(Error::FileHashMissing(hash))` if the authorization event contains x tags, but none of them match the provided `hash`.
+
 pub fn validate_auth_event_x(auth_event: &Event, hash: &str) -> Result<String, Error> {
     // Fetch all x tags from authorization event
     let x_tags: Vec<Tag> = auth_event
