@@ -120,7 +120,11 @@ pub async fn create_router(app_state: AppState) -> Router {
                 .head(has_blob_handler)
                 .delete(delete_blob_handler),
         )
-        .route("/upload", put(upload_blob_handler))
+        .route(
+            "/upload",
+            put(upload_blob_handler)
+                .head(upload_head_handler)
+        )
         .route("/list/:pubkey", get(list_blobs_handler))
         .route("/mirror", put(mirror_blob_handler))
         .layer(cors)
@@ -338,28 +342,25 @@ pub async fn list_blobs_handler(
     Json(blob_descriptors).into_response()
 }
 
-pub async fn upload_blob_handler(
-    State(app_state): State<AppState>,
-    AuthHeader(auth_event): AuthHeader,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
+/// Perform checks for upload that can be done without the actual blob, like whether user is
+/// allowed to upload files.
+/// Returns the validated autentication event and content type on success, or a HTTP status code
+/// and message on failure.
+pub fn upload_blob_prechecks(
+    app_state: &AppState,
+    auth_event: Option<Event>,
+    headers: &HeaderMap,
+) -> Result<(Event, Option<String>), (StatusCode, String)> {
     // Validate that uploads are enabled
     if !app_state.config.upload.enabled {
-        let json = Json(ErrorResponse {
-            message: "Uploads are disabled".to_string(),
-        });
-        return (StatusCode::NOT_FOUND, json).into_response();
+        return Err((StatusCode::NOT_FOUND, "Uploads are disabled".to_string()));
     }
 
     // Get the auth event from HTTP headers
     let auth_event = match auth_event {
         Some(auth_event) => auth_event,
         None => {
-            let json = Json(ErrorResponse {
-                message: "Authorization event required to upload a blob".to_string(),
-            });
-            return (StatusCode::UNAUTHORIZED, json).into_response();
+            return Err((StatusCode::UNAUTHORIZED, "Authorization event required to upload a blob".to_string()));
         }
     };
 
@@ -367,12 +368,61 @@ pub async fn upload_blob_handler(
     match validate_auth_event(&auth_event, "upload") {
         Ok(_) => {}
         Err(error_msg) => {
-            let json = Json(ErrorResponse {
-                message: error_msg.to_string(),
-            });
-            return (StatusCode::UNAUTHORIZED, json).into_response();
+            return Err((StatusCode::UNAUTHORIZED, error_msg.to_string()));
         }
     }
+
+    // Check if public key is allowed to upload to the server
+    if let Err(e) = is_public_key_allowed_to_upload(&app_state.config, &auth_event.pubkey) {
+        return Err((StatusCode::UNAUTHORIZED, e.to_string()));
+    }
+
+    // Get the value of the Content-Length header, and check it against the allowed size.
+    let content_length = headers
+        .get("Content-Length")
+        .map(|v| v.to_str().unwrap_or_default().to_string())
+        .and_then(|v| v.parse::<u64>().ok());
+    let content_length = if let Some(val) = content_length {
+        val
+    } else {
+        return Err((StatusCode::BAD_REQUEST, "Missing or invalid Content-Length header".to_string()));
+    };
+    let blob_size_in_mb = bytes_to_mb(content_length as f64);
+    if blob_size_in_mb > app_state.config.upload.max_size {
+        return Err((StatusCode::BAD_REQUEST, format!(
+                "Blob size is {} MB, max upload size is {} MB",
+                blob_size_in_mb, app_state.config.upload.max_size
+            )));
+    }
+
+    // Get the value of the Content-Type header
+    let content_type = headers
+        .get("Content-Type")
+        .map(|v| v.to_str().unwrap_or_default().to_string());
+
+    // Validate the MIME type
+    if let Err(e) = is_mime_type_allowed(&app_state.config, &content_type) {
+        return Err((StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()));
+    }
+
+    Ok((auth_event, content_type))
+}
+
+pub async fn upload_blob_handler(
+    State(app_state): State<AppState>,
+    AuthHeader(auth_event): AuthHeader,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let (auth_event, content_type) = match upload_blob_prechecks(&app_state, auth_event, &headers) {
+        Ok(auth_event) => auth_event,
+        Err((code, message)) => {
+            let json = Json(ErrorResponse {
+                message: message,
+            });
+            return (code, json).into_response();
+        }
+    };
 
     // Validate the file hash against the hash defined in the authorization event
     let file_hash = match validate_file_hash(&auth_event, &body) {
@@ -386,36 +436,17 @@ pub async fn upload_blob_handler(
     };
 
     // Check that the size of the blob does not exceed the limit set in the upload config
+    // This check is already done for Content-Length header in upload_blob_prechecks, but here
+    // we have the actual size of the blob, which is not necessarily the same.
     let blob_size_in_mb = bytes_to_mb(body.len() as f64);
     if blob_size_in_mb > app_state.config.upload.max_size {
         let json = Json(ErrorResponse {
             message: format!(
-                "Blob size is {} MB, max upload size is {}",
+                "Blob size is {} MB, max upload size is {} MB",
                 blob_size_in_mb, app_state.config.upload.max_size
             ),
         });
         return (StatusCode::BAD_REQUEST, json).into_response();
-    }
-
-    // Check if public key is allowed to upload to the server
-    if let Err(e) = is_public_key_allowed_to_upload(&app_state.config, &auth_event.pubkey) {
-        let json = Json(ErrorResponse {
-            message: e.to_string(),
-        });
-        return (StatusCode::UNAUTHORIZED, json).into_response();
-    }
-
-    // Get the value of the Content-Type header
-    let content_type = headers
-        .get("Content-Type")
-        .map(|v| v.to_str().unwrap_or_default().to_string());
-
-    // Validate the MIME type
-    if let Err(e) = is_mime_type_allowed(&app_state.config, &content_type) {
-        let json = Json(ErrorResponse {
-            message: e.to_string(),
-        });
-        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, json).into_response();
     }
 
     // Write blob to file system
@@ -487,6 +518,19 @@ pub async fn upload_blob_handler(
             };
             let json = Json(error_message);
             (StatusCode::INTERNAL_SERVER_ERROR, json).into_response()
+        }
+    }
+}
+
+pub async fn upload_head_handler(
+    State(app_state): State<AppState>,
+    AuthHeader(auth_event): AuthHeader,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    match upload_blob_prechecks(&app_state, auth_event, &headers) {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err((code, message)) => {
+            (code, [("X-Reason", message)]).into_response()
         }
     }
 }
