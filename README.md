@@ -17,6 +17,7 @@ It stores files right to disk and stores metadata in a sqlite database.
 | BUD-02 | ✅      |
 | BUD-03 | N/A    |
 | BUD-04 | ✅      |
+| BUD-06 | ✅      |
 
 
 ## Getting Started
