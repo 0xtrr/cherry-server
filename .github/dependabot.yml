@@ -1,0 +1,10 @@
+version: 1
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    labels:
+      - "dependabot"
+    reviewers:
+      - "0xtrr"
