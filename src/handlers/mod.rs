@@ -1140,14 +1140,13 @@ mod tests {
     /// temporary database and file directory.
     async fn set_up_app_state() -> AppState {
         let temp_dir = temp_dir();
-        let files_dir = temp_dir.as_path().join("files").to_string_lossy().into();
         let db_dir = temp_dir.as_path();
         let db_url = format!("sqlite://{}", db_dir.join("test.db").display());
         let pool = set_up_sqlite_db(db_url).await.unwrap();
 
         let config = Config {
             database_directory: db_dir.to_string_lossy().into(),
-            files_directory: files_dir,
+            files_directory: temp_dir.as_path().join("files").to_string_lossy().into(),
             server_url: "https://example.com".to_string(),
             host: "127.0.0.1:8080".to_string(),
             get: GetBlobConfig {
