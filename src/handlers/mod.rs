@@ -380,19 +380,22 @@ pub fn upload_blob_prechecks(
     // Get the value of the Content-Length header, and check it against the allowed size.
     let content_length = headers
         .get("Content-Length")
-        .map(|v| v.to_str().unwrap_or_default().to_string())
-        .and_then(|v| v.parse::<u64>().ok());
-    let content_length = if let Some(val) = content_length {
-        val
-    } else {
-        return Err((StatusCode::BAD_REQUEST, "Missing or invalid Content-Length header".to_string()));
-    };
-    let blob_size_in_mb = bytes_to_mb(content_length as f64);
-    if blob_size_in_mb > app_state.config.upload.max_size {
-        return Err((StatusCode::BAD_REQUEST, format!(
-                "Blob size is {} MB, max upload size is {} MB",
-                blob_size_in_mb, app_state.config.upload.max_size
-            )));
+        .map(|v| v.to_str().unwrap_or_default().to_string());
+
+    // Only check validity if the header is present.
+    // This is safe, because in the PUT /upload implementation the actual blob size is checked.
+    if let Some(content_length) = content_length {
+        if let Ok(content_length) = content_length.parse::<u64>() {
+            let blob_size_in_mb = bytes_to_mb(content_length as f64);
+            if blob_size_in_mb > app_state.config.upload.max_size {
+                return Err((StatusCode::BAD_REQUEST, format!(
+                        "Blob size is {} MB, max upload size is {} MB",
+                        blob_size_in_mb, app_state.config.upload.max_size
+                    )));
+            }
+        } else {
+            return Err((StatusCode::BAD_REQUEST, "Invalid Content-Length header".to_string()));
+        };
     }
 
     // Get the value of the Content-Type header
