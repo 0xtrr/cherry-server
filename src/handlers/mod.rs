@@ -122,8 +122,7 @@ pub async fn create_router(app_state: AppState) -> Router {
         )
         .route(
             "/upload",
-            put(upload_blob_handler)
-                .head(upload_head_handler)
+            put(upload_blob_handler).head(upload_head_handler),
         )
         .route("/list/:pubkey", get(list_blobs_handler))
         .route("/mirror", put(mirror_blob_handler))
@@ -190,7 +189,7 @@ pub async fn get_blob_handler(
         .unwrap();
 
         if result.is_none() {
-            return (StatusCode::NOT_FOUND).into_response();
+            return StatusCode::NOT_FOUND.into_response();
         }
         result
     } else {
@@ -201,7 +200,7 @@ pub async fn get_blob_handler(
                 .await
                 .unwrap();
         if result.is_none() {
-            return (StatusCode::NOT_FOUND).into_response();
+            return StatusCode::NOT_FOUND.into_response();
         }
         result
     };
@@ -344,7 +343,7 @@ pub async fn list_blobs_handler(
 
 /// Perform checks for upload that can be done without the actual blob, like whether user is
 /// allowed to upload files.
-/// Returns the validated autentication event and content type on success, or a HTTP status code
+/// Returns the validated authentication event and content type on success, or an HTTP status code
 /// and message on failure.
 pub fn upload_blob_prechecks(
     app_state: &AppState,
@@ -360,7 +359,10 @@ pub fn upload_blob_prechecks(
     let auth_event = match auth_event {
         Some(auth_event) => auth_event,
         None => {
-            return Err((StatusCode::UNAUTHORIZED, "Authorization event required to upload a blob".to_string()));
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Authorization event required to upload a blob".to_string(),
+            ));
         }
     };
 
@@ -388,13 +390,19 @@ pub fn upload_blob_prechecks(
         if let Ok(content_length) = content_length.parse::<u64>() {
             let blob_size_in_mb = bytes_to_mb(content_length as f64);
             if blob_size_in_mb > app_state.config.upload.max_size {
-                return Err((StatusCode::BAD_REQUEST, format!(
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
                         "Blob size is {} MB, max upload size is {} MB",
                         blob_size_in_mb, app_state.config.upload.max_size
-                    )));
+                    ),
+                ));
             }
         } else {
-            return Err((StatusCode::BAD_REQUEST, "Invalid Content-Length header".to_string()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid Content-Length header".to_string(),
+            ));
         };
     }
 
@@ -420,9 +428,7 @@ pub async fn upload_blob_handler(
     let (auth_event, content_type) = match upload_blob_prechecks(&app_state, auth_event, &headers) {
         Ok(auth_event) => auth_event,
         Err((code, message)) => {
-            let json = Json(ErrorResponse {
-                message: message,
-            });
+            let json = Json(ErrorResponse { message });
             return (code, json).into_response();
         }
     };
@@ -532,9 +538,7 @@ pub async fn upload_head_handler(
 ) -> impl IntoResponse {
     match upload_blob_prechecks(&app_state, auth_event, &headers) {
         Ok(_) => StatusCode::OK.into_response(),
-        Err((code, message)) => {
-            (code, [("X-Reason", message)]).into_response()
-        }
+        Err((code, message)) => (code, [("X-Reason", message)]).into_response(),
     }
 }
 
@@ -654,7 +658,7 @@ pub async fn delete_blob_handler(
         }
     }
 
-    (StatusCode::NO_CONTENT).into_response()
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn mirror_blob_handler(
@@ -799,7 +803,7 @@ mod tests {
     };
     use crate::db::set_up_sqlite_db;
     use crate::handlers::create_router;
-    use crate::utilities::file::write_blob_to_file;
+    use crate::utilities::file::{create_directory_if_not_exists, write_blob_to_file};
     use crate::utilities::get_sha256_hash;
     use crate::{AppState, BlobDescriptor};
     use axum::body::{Body, Bytes};
@@ -811,8 +815,10 @@ mod tests {
     use std::env::temp_dir;
     use std::ops::Add;
     use std::path::Path;
+    use std::process::exit;
     use std::time::SystemTime;
     use tower::ServiceExt;
+    use tracing::log::error;
 
     #[tokio::test]
     async fn get_blob_handler_test() {
@@ -1017,7 +1023,7 @@ mod tests {
         assert_eq!(blob_descriptor.r#type, Some("text/plain".to_string()));
 
         let file_path = format!("{}/{}", app_state.config.files_directory, file_hash);
-        assert!(std::path::Path::new(&file_path).exists());
+        assert!(Path::new(&file_path).exists());
     }
 
     #[tokio::test]
@@ -1165,6 +1171,24 @@ mod tests {
             },
             mirror: MirrorConfig { enable: false },
         };
+
+        // Ensure the blobs directory exists
+        match create_directory_if_not_exists(&config.files_directory) {
+            Ok(_) => {}
+            Err(e) => {
+                error!("{}", e);
+                exit(1);
+            }
+        }
+
+        // Ensure the db directory exists
+        match create_directory_if_not_exists(&config.database_directory) {
+            Ok(_) => {}
+            Err(e) => {
+                error!("{}", e);
+                exit(1);
+            }
+        }
 
         AppState { config, pool }
     }
