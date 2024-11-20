@@ -81,6 +81,7 @@ pub fn write_blob_to_file(
         Ok(file) => file,
         Err(e) => {
             error!("{}", e);
+            eprintln!("{}", e);
             return Err(Error::CreateFile);
         }
     };
