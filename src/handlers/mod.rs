@@ -515,11 +515,10 @@ pub async fn upload_blob_handler(
             Json(blob_descriptor).into_response()
         }
         Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
-            let error_message = ErrorResponse {
-                message: "Blob already uploaded by this public key".to_string(),
-            };
-            let json = Json(error_message);
-            (StatusCode::CONFLICT, json).into_response()
+            // Blob already uploaded by this public key.
+            // Return the blob descriptor again, but without increasing the
+            // reference count.
+            Json(blob_descriptor).into_response()
         }
         Err(_) => {
             let error_message = ErrorResponse {
