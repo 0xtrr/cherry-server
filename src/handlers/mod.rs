@@ -1103,6 +1103,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_blob_handler_test_mimetype_whitelist() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) = set_up_app_state(
+            ConfigBuilder::new()
+                .upload(UploadBlobConfig {
+                    enabled: true,
+                    max_size: 1024.0,
+                    public_key_filter: UploadPublicKeyConfig {
+                        enabled: false,
+                        mode: UploadFilterListMode::Whitelist,
+                        public_keys: vec![],
+                    },
+                    mimetype_filter: UploadMimeTypeConfig {
+                        enabled: true,
+                        mode: UploadFilterListMode::Whitelist,
+                        mime_types: vec!["image/jpeg".to_string()],
+                    },
+                }),
+        )
+            .await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test blob
+        let file_contents = b"Hello, World!";
+        let file_hash = get_sha256_hash(&Bytes::from(file_contents.to_vec()));
+
+        // Create timestamp for expiration tag
+        let timestamp = SystemTime::now()
+            .add(core::time::Duration::new(3600, 0))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set up tags needed in auth header
+        let tags = vec![
+            Tag::hashtag("upload"),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
+                vec![file_hash.to_owned()],
+            ),
+            Tag::expiration(Timestamp::from(timestamp)),
+        ];
+
+        // Create the auth header
+        let auth_header = generate_blossom_auth_header(keypair.clone(), "upload".to_string(), tags);
+
+        let request = Request::builder()
+            .method(http::Method::PUT)
+            .uri("/upload")
+            .header("Authorization", format!("Nostr {}", auth_header))
+            .header("Content-Type", "text/plain")
+            .body(Body::from(file_contents.to_vec()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
     async fn get_blob_handler_test_invalid_auth_event() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
