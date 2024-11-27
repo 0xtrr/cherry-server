@@ -892,6 +892,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_blob_handler_test_invalid_auth_event() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        // Activate auth requirement in get blob config
+        let (app_state, _temp_dir) =
+            set_up_app_state(ConfigBuilder::new().get(GetBlobConfig { require_auth: true })).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test blob descriptor
+        let file_hash =
+            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
+        let blob_descriptor = BlobDescriptor {
+            url: format!("{}/{}", app_state.config.server_url, file_hash),
+            sha256: file_hash.clone(),
+            size: 1024,
+            r#type: Some("text/plain".to_string()),
+            uploaded: 1643723400,
+        };
+
+        // Insert the blob descriptor into the database
+        sqlx::query(
+            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+            .bind(&blob_descriptor.url)
+            .bind(&blob_descriptor.sha256)
+            .bind(blob_descriptor.size)
+            .bind(&blob_descriptor.r#type)
+            .bind(blob_descriptor.uploaded)
+            .bind(keypair.public_key().to_hex())
+            .execute(&app_state.pool)
+            .await
+            .unwrap();
+
+        // Create a test file to store in the file directory.
+        let file_contents = b"Hello, World!";
+        write_blob_to_file(
+            &Path::new(&app_state.config.files_directory),
+            &file_hash,
+            Bytes::from(file_contents.to_vec()),
+        )
+            .unwrap();
+
+        // Create a test auth event with invalid kind
+        let tags = vec![
+            Tag::hashtag("get"),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
+                vec![file_hash.to_owned()],
+            ),
+            Tag::expiration(Timestamp::from(1643723400)),
+        ];
+        let auth_event = EventBuilder::new(Kind::Custom(1), "get".to_string(), tags)
+            .sign_with_keys(&keypair)
+            .unwrap();
+
+        // Send a GET request to retrieve the blob.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(&format!("/{}", file_hash))
+                    .header(
+                        "Authorization",
+                        format!(
+                            "Nostr {}",
+                            base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
+                        ),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Unauthorized (401).
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_blob_handler_test_blob_not_found() {
+        // Set up app config and axum router
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test file hash that does not exist in the database
+        let file_hash =
+            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
+
+        // Send a GET request to retrieve the blob.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(&format!("/{}", file_hash))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Not Found (404).
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_blob_handler_test_invalid_hash_string() {
+        // Set up app config and axum router
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Send a GET request to retrieve the blob.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri("/an-invalid-hash")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Not Found (404).
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn has_blob_handler_test() {
         // Set up app config and axum router
         let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
@@ -1161,133 +1288,6 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    }
-
-    #[tokio::test]
-    async fn get_blob_handler_test_invalid_auth_event() {
-        // Set up app config, keypair and axum router
-        let keypair = Keys::generate();
-        // Activate auth requirement in get blob config
-        let (app_state, _temp_dir) =
-            set_up_app_state(ConfigBuilder::new().get(GetBlobConfig { require_auth: true })).await;
-        let app = create_router(app_state.clone()).await;
-
-        // Create a test blob descriptor
-        let file_hash =
-            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
-        let blob_descriptor = BlobDescriptor {
-            url: format!("{}/{}", app_state.config.server_url, file_hash),
-            sha256: file_hash.clone(),
-            size: 1024,
-            r#type: Some("text/plain".to_string()),
-            uploaded: 1643723400,
-        };
-
-        // Insert the blob descriptor into the database
-        sqlx::query(
-            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-            .bind(&blob_descriptor.url)
-            .bind(&blob_descriptor.sha256)
-            .bind(blob_descriptor.size)
-            .bind(&blob_descriptor.r#type)
-            .bind(blob_descriptor.uploaded)
-            .bind(keypair.public_key().to_hex())
-            .execute(&app_state.pool)
-            .await
-            .unwrap();
-
-        // Create a test file to store in the file directory.
-        let file_contents = b"Hello, World!";
-        write_blob_to_file(
-            &Path::new(&app_state.config.files_directory),
-            &file_hash,
-            Bytes::from(file_contents.to_vec()),
-        )
-        .unwrap();
-
-        // Create a test auth event with invalid kind
-        let tags = vec![
-            Tag::hashtag("get"),
-            Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
-                vec![file_hash.to_owned()],
-            ),
-            Tag::expiration(Timestamp::from(1643723400)),
-        ];
-        let auth_event = EventBuilder::new(Kind::Custom(1), "get".to_string(), tags)
-            .sign_with_keys(&keypair)
-            .unwrap();
-
-        // Send a GET request to retrieve the blob.
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(http::Method::GET)
-                    .uri(&format!("/{}", file_hash))
-                    .header(
-                        "Authorization",
-                        format!(
-                            "Nostr {}",
-                            base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Verify that the response status code is Unauthorized (401).
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn get_blob_handler_test_blob_not_found() {
-        // Set up app config and axum router
-        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
-        let app = create_router(app_state.clone()).await;
-
-        // Create a test file hash that does not exist in the database
-        let file_hash =
-            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
-
-        // Send a GET request to retrieve the blob.
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(http::Method::GET)
-                    .uri(&format!("/{}", file_hash))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Verify that the response status code is Not Found (404).
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn get_blob_handler_test_invalid_hash_string() {
-        // Set up app config and axum router
-        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
-        let app = create_router(app_state.clone()).await;
-
-        // Send a GET request to retrieve the blob.
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(http::Method::GET)
-                    .uri("/an-invalid-hash")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Verify that the response status code is Not Found (404).
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
