@@ -1382,6 +1382,66 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[tokio::test]
+    async fn delete_blob_handler_test_invalid_auth_event() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test blob descriptor
+        let file_hash =
+            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
+        let blob_descriptor = BlobDescriptor {
+            url: format!("{}/{}", app_state.config.server_url, file_hash),
+            sha256: file_hash.clone(),
+            size: 1024,
+            r#type: Some("application/octet-stream".to_string()),
+            uploaded: 1643723400,
+        };
+
+        // Insert the blob descriptor into the database
+        sqlx::query(
+            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+            .bind(&blob_descriptor.url)
+            .bind(&blob_descriptor.sha256)
+            .bind(blob_descriptor.size)
+            .bind(&blob_descriptor.r#type)
+            .bind(blob_descriptor.uploaded)
+            .bind(keypair.public_key().to_hex())
+            .execute(&app_state.pool)
+            .await
+            .unwrap();
+
+        // Create a test auth event with invalid kind
+        let tags = vec![
+            Tag::hashtag("delete"),
+            Tag::expiration(Timestamp::from(1643723400)),
+        ];
+        let auth_event = EventBuilder::new(Kind::Custom(1), "delete".to_string(), tags)
+            .sign_with_keys(&keypair)
+            .unwrap();
+
+        // Send DELETE request to our handler
+        let request = Request::builder()
+            .method(http::Method::DELETE)
+            .uri(&format!("/{}", file_hash))
+            .header(
+                "Authorization",
+                format!(
+                    "Nostr {}",
+                    base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
+                ),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        // Verify expected HTTP response status
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     /// Sets up the application state for testing purposes.
     ///
     /// This function creates a temporary directory, sets up a SQLite database within it, and creates the necessary directories for storing files.
