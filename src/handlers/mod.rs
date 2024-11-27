@@ -23,7 +23,7 @@ use base64::Engine;
 use nostr_sdk::{Event, PublicKey, SingleLetterTag, TagKind};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sqlx::query_as;
+use sqlx::{query_as, Error};
 use tower_http::cors::Any;
 use tracing::log::error;
 
@@ -178,31 +178,42 @@ pub async fn get_blob_handler(
         }
     }
 
-    let blob_descriptor = if app_state.config.get.require_auth {
-        let result = query_as::<_, BlobDescriptor>(
+    // Define which query to run. By default, we always search for a blob descriptor using the
+    // file hash provided in the url path. If auth is required, we also use the auth event pubkey
+    // when searching for a blob descriptor.
+    let blob_descriptor_query = match app_state.config.get.require_auth {
+        true => query_as::<_, BlobDescriptor>(
             "SELECT * FROM blob_descriptors WHERE sha256 = ? AND pubkey = ?",
         )
         .bind(&file_hash)
         .bind(auth_event.unwrap().pubkey.to_hex())
-        .fetch_optional(&app_state.pool)
-        .await
-        .unwrap();
+        .fetch_one(&app_state.pool),
+        false => query_as::<_, BlobDescriptor>("SELECT * FROM blob_descriptors WHERE sha256 = ?")
+            .bind(&file_hash)
+            .fetch_one(&app_state.pool),
+    };
 
-        if result.is_none() {
-            return StatusCode::NOT_FOUND.into_response();
+    // Execute the query against the database.
+    let result = blob_descriptor_query.await;
+
+    // Return the blob descriptor if it was found, a 404 if not found or a 500 if something else went wrong.
+    let blob_descriptor = match result {
+        Ok(descriptor) => {
+            println!("DESCRIPTOR FOUND: {:?}", descriptor);
+            descriptor
         }
-        result
-    } else {
-        let result =
-            query_as::<_, BlobDescriptor>("SELECT * FROM blob_descriptors WHERE sha256 = ?")
-                .bind(&file_hash)
-                .fetch_optional(&app_state.pool)
-                .await
-                .unwrap();
-        if result.is_none() {
-            return StatusCode::NOT_FOUND.into_response();
+        Err(Error::RowNotFound) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            eprintln!("{:?}", e);
+            error!("Error fetching blob descriptor: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    message: "Error fetching blob descriptor. Contact system admin.".to_string(),
+                }),
+            )
+                .into_response();
         }
-        result
     };
 
     // Get blob from filesystem
@@ -245,8 +256,7 @@ pub async fn get_blob_handler(
         };
 
     let content_type = blob_descriptor
-        .as_ref()
-        .and_then(|desc| desc.r#type.clone())
+        .r#type
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
     Response::builder()
@@ -812,11 +822,11 @@ mod tests {
     use base64::Engine;
     use http_body_util::BodyExt;
     use nostr_sdk::{EventBuilder, JsonUtil, Keys, Kind, SingleLetterTag, Tag, TagKind, Timestamp};
-    use std::env::temp_dir;
     use std::ops::Add;
     use std::path::Path;
     use std::process::exit;
     use std::time::SystemTime;
+    use tempfile::TempDir;
     use tower::ServiceExt;
     use tracing::log::error;
 
@@ -824,7 +834,7 @@ mod tests {
     async fn get_blob_handler_test() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
-        let app_state: AppState = set_up_app_state(ConfigBuilder::new()).await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // Create a test blob descriptor
@@ -884,7 +894,7 @@ mod tests {
     #[tokio::test]
     async fn has_blob_handler_test() {
         // Set up app config and axum router
-        let app_state: AppState = set_up_app_state(ConfigBuilder::new()).await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // File hash used as filename
@@ -920,7 +930,7 @@ mod tests {
     async fn list_blobs_handler_test() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
-        let app_state: AppState = set_up_app_state(ConfigBuilder::new()).await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // Create a test blob descriptor
@@ -976,7 +986,7 @@ mod tests {
     async fn upload_blob_handler_test() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
-        let app_state: AppState = set_up_app_state(ConfigBuilder::new()).await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // Create a test blob
@@ -1031,7 +1041,7 @@ mod tests {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
         // Activate auth requirement in get blob config
-        let app_state: AppState =
+        let (app_state, _temp_dir) =
             set_up_app_state(ConfigBuilder::new().get(GetBlobConfig { require_auth: true })).await;
         let app = create_router(app_state.clone()).await;
 
@@ -1106,10 +1116,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_blob_handler_test_blob_not_found() {
+        // Set up app config and axum router
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test file hash that does not exist in the database
+        let file_hash =
+            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
+
+        // Send a GET request to retrieve the blob.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(&format!("/{}", file_hash))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Not Found (404).
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_blob_handler_test_invalid_hash_string() {
+        // Set up app config and axum router
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Send a GET request to retrieve the blob.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri("/an-invalid-hash")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Not Found (404).
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn delete_blob_handler_test() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
-        let app_state: AppState = set_up_app_state(ConfigBuilder::new()).await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // Create a test blob descriptor
@@ -1197,30 +1255,41 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// Sets up a test `AppState` instance with a temporary database and file directory.
+    /// Sets up the application state for testing purposes.
     ///
-    /// This function creates a temporary directory, sets up a SQLite database within it,
-    /// and creates a test `Config` instance using the provided `ConfigBuilder`.
-    /// It then returns an `AppState` instance with the test configuration and database pool.
+    /// This function creates a temporary directory, sets up a SQLite database within it, and creates the necessary directories for storing files.
     ///
-    /// # Example
+    /// # Parameters
     ///
-    /// ```
-    /// let config_builder = ConfigBuilder::new()
-    ///     .database_directory("/path/to/db".to_string())
-    ///     .files_directory("/path/to/files".to_string())
-    ///     .server_url("https://example.com".to_string());
-    /// let app_state = set_up_app_state(config_builder).await;
-    /// ```
-    async fn set_up_app_state(config_builder: ConfigBuilder) -> AppState {
-        let temp_dir = temp_dir();
-        let db_dir = temp_dir.as_path();
-        let db_url = format!("sqlite://{}", db_dir.join("test.db").display());
-        let pool = set_up_sqlite_db(db_url).await.unwrap();
+    /// * `config_builder`: A `ConfigBuilder` instance used to construct the application configuration.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the `AppState` instance and the `TempDir` instance used to create the temporary directory.
+    ///
+    /// # Panics
+    ///
+    /// If an error occurs while setting up the test database, this function will panic with an error message.
+    ///
+    async fn set_up_app_state(config_builder: ConfigBuilder) -> (AppState, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
 
+        let db_url = format!("sqlite://{}", temp_dir.path().join("test.db").display());
+
+        let pool_result = set_up_sqlite_db(db_url).await;
+
+        let pool = match pool_result {
+            Ok(pool) => pool,
+            Err(e) => {
+                eprintln!("Error setting up test DB: {:?}", e);
+                panic!("Error setting up test DB");
+            }
+        };
+
+        let files_dir = temp_dir.path().join("files").to_string_lossy().to_string();
         let config = config_builder
-            .database_directory(db_dir.to_string_lossy().to_string())
-            .files_directory(temp_dir.as_path().join("files").to_string_lossy().into())
+            .database_directory(temp_dir.path().display().to_string())
+            .files_directory(files_dir)
             .build();
 
         // Ensure the blobs directory exists
@@ -1241,7 +1310,7 @@ mod tests {
             }
         }
 
-        AppState { config, pool }
+        (AppState { config, pool }, temp_dir)
     }
 
     fn generate_blossom_auth_header(keys: Keys, action: String, tags: Vec<Tag>) -> String {
