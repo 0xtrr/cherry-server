@@ -812,7 +812,7 @@ mod tests {
         UploadMimeTypeConfig, UploadPublicKeyConfig,
     };
     use crate::db::set_up_sqlite_db;
-    use crate::handlers::create_router;
+    use crate::handlers::{create_router, MirrorRequest};
     use crate::utilities::file::{create_directory_if_not_exists, write_blob_to_file};
     use crate::utilities::get_sha256_hash;
     use crate::{AppState, BlobDescriptor};
@@ -1439,6 +1439,47 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
 
         // Verify expected HTTP response status
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn mirror_blob_handler_test_invalid_auth_event() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        // Enable mirror endpoint
+        let (app_state, _temp_dir) =
+            set_up_app_state(ConfigBuilder::new().mirror(MirrorConfig { enable: true })).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test auth event with invalid kind
+        let tags = vec![
+            Tag::hashtag("upload"),
+            Tag::expiration(Timestamp::from(1643723400)),
+        ];
+        let auth_event = EventBuilder::new(Kind::Custom(1), "upload".to_string(), tags)
+            .sign_with_keys(&keypair)
+            .unwrap();
+
+        let mirror_request = MirrorRequest {
+            url: "https://example.com/blob".to_string(),
+        };
+
+        let request = Request::builder()
+            .method(http::Method::PUT)
+            .uri("/mirror")
+            .header(
+                "Authorization",
+                format!(
+                    "Nostr {}",
+                    base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
+                ),
+            )
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_string(&mirror_request).unwrap())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
