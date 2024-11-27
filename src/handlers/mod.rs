@@ -983,6 +983,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_blobs_handler_test_invalid_auth_event() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        // Activate auth requirement in list config
+        let (app_state, _temp_dir) =
+            set_up_app_state(ConfigBuilder::new().list(ListConfig { require_auth: true })).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test blob descriptor
+        let file_hash =
+            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
+        let blob_descriptor = BlobDescriptor {
+            url: format!("{}/{}", app_state.config.server_url, file_hash),
+            sha256: file_hash.clone(),
+            size: 1024,
+            r#type: Some("application/octet-stream".to_string()),
+            uploaded: 1643723400,
+        };
+
+        // Insert the blob descriptor into the database
+        sqlx::query(
+            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+            .bind(&blob_descriptor.url)
+            .bind(&blob_descriptor.sha256)
+            .bind(blob_descriptor.size)
+            .bind(&blob_descriptor.r#type)
+            .bind(blob_descriptor.uploaded)
+            .bind(keypair.public_key().to_hex())
+            .execute(&app_state.pool)
+            .await
+            .unwrap();
+
+        // Create a test auth event with invalid kind
+        let tags = vec![
+            Tag::hashtag("list"),
+            Tag::expiration(Timestamp::from(1643723400)),
+        ];
+        let auth_event = EventBuilder::new(Kind::Custom(1), "list".to_string(), tags)
+            .sign_with_keys(&keypair)
+            .unwrap();
+
+        // Send a GET request to list blobs.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(&format!("/list/{}", keypair.public_key().to_hex()))
+                    .header(
+                        "Authorization",
+                        format!(
+                            "Nostr {}",
+                            base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
+                        ),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Unauthorized (401).
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn upload_blob_handler_test() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
