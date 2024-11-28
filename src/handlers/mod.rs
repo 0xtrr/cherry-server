@@ -23,7 +23,7 @@ use base64::Engine;
 use nostr_sdk::{Event, PublicKey, SingleLetterTag, TagKind};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sqlx::query_as;
+use sqlx::{query_as, Error};
 use tower_http::cors::Any;
 use tracing::log::error;
 
@@ -178,31 +178,42 @@ pub async fn get_blob_handler(
         }
     }
 
-    let blob_descriptor = if app_state.config.get.require_auth {
-        let result = query_as::<_, BlobDescriptor>(
+    // Define which query to run. By default, we always search for a blob descriptor using the
+    // file hash provided in the url path. If auth is required, we also use the auth event pubkey
+    // when searching for a blob descriptor.
+    let blob_descriptor_query = match app_state.config.get.require_auth {
+        true => query_as::<_, BlobDescriptor>(
             "SELECT * FROM blob_descriptors WHERE sha256 = ? AND pubkey = ?",
         )
         .bind(&file_hash)
         .bind(auth_event.unwrap().pubkey.to_hex())
-        .fetch_optional(&app_state.pool)
-        .await
-        .unwrap();
+        .fetch_one(&app_state.pool),
+        false => query_as::<_, BlobDescriptor>("SELECT * FROM blob_descriptors WHERE sha256 = ?")
+            .bind(&file_hash)
+            .fetch_one(&app_state.pool),
+    };
 
-        if result.is_none() {
-            return StatusCode::NOT_FOUND.into_response();
+    // Execute the query against the database.
+    let result = blob_descriptor_query.await;
+
+    // Return the blob descriptor if it was found, a 404 if not found or a 500 if something else went wrong.
+    let blob_descriptor = match result {
+        Ok(descriptor) => {
+            println!("DESCRIPTOR FOUND: {:?}", descriptor);
+            descriptor
         }
-        result
-    } else {
-        let result =
-            query_as::<_, BlobDescriptor>("SELECT * FROM blob_descriptors WHERE sha256 = ?")
-                .bind(&file_hash)
-                .fetch_optional(&app_state.pool)
-                .await
-                .unwrap();
-        if result.is_none() {
-            return StatusCode::NOT_FOUND.into_response();
+        Err(Error::RowNotFound) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            eprintln!("{:?}", e);
+            error!("Error fetching blob descriptor: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    message: "Error fetching blob descriptor. Contact system admin.".to_string(),
+                }),
+            )
+                .into_response();
         }
-        result
     };
 
     // Get blob from filesystem
@@ -245,8 +256,7 @@ pub async fn get_blob_handler(
         };
 
     let content_type = blob_descriptor
-        .as_ref()
-        .and_then(|desc| desc.r#type.clone())
+        .r#type
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
     Response::builder()
@@ -801,7 +811,7 @@ mod tests {
         UploadMimeTypeConfig, UploadPublicKeyConfig,
     };
     use crate::db::set_up_sqlite_db;
-    use crate::handlers::create_router;
+    use crate::handlers::{create_router, MirrorRequest};
     use crate::utilities::file::{create_directory_if_not_exists, write_blob_to_file};
     use crate::utilities::get_sha256_hash;
     use crate::{AppState, BlobDescriptor};
@@ -811,11 +821,11 @@ mod tests {
     use base64::Engine;
     use http_body_util::BodyExt;
     use nostr_sdk::{EventBuilder, JsonUtil, Keys, Kind, SingleLetterTag, Tag, TagKind, Timestamp};
-    use std::env::temp_dir;
     use std::ops::Add;
     use std::path::Path;
     use std::process::exit;
     use std::time::SystemTime;
+    use tempfile::TempDir;
     use tower::ServiceExt;
     use tracing::log::error;
 
@@ -823,7 +833,7 @@ mod tests {
     async fn get_blob_handler_test() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
-        let app_state: AppState = set_up_app_state().await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // Create a test blob descriptor
@@ -881,9 +891,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_blob_handler_test_invalid_auth_event() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        // Activate auth requirement in get blob config
+        let (app_state, _temp_dir) =
+            set_up_app_state(ConfigBuilder::new().get(GetBlobConfig { require_auth: true })).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test blob descriptor
+        let file_hash =
+            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
+        let blob_descriptor = BlobDescriptor {
+            url: format!("{}/{}", app_state.config.server_url, file_hash),
+            sha256: file_hash.clone(),
+            size: 1024,
+            r#type: Some("text/plain".to_string()),
+            uploaded: 1643723400,
+        };
+
+        // Insert the blob descriptor into the database
+        sqlx::query(
+            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+            .bind(&blob_descriptor.url)
+            .bind(&blob_descriptor.sha256)
+            .bind(blob_descriptor.size)
+            .bind(&blob_descriptor.r#type)
+            .bind(blob_descriptor.uploaded)
+            .bind(keypair.public_key().to_hex())
+            .execute(&app_state.pool)
+            .await
+            .unwrap();
+
+        // Create a test file to store in the file directory.
+        let file_contents = b"Hello, World!";
+        write_blob_to_file(
+            &Path::new(&app_state.config.files_directory),
+            &file_hash,
+            Bytes::from(file_contents.to_vec()),
+        )
+            .unwrap();
+
+        // Create a test auth event with invalid kind
+        let tags = vec![
+            Tag::hashtag("get"),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
+                vec![file_hash.to_owned()],
+            ),
+            Tag::expiration(Timestamp::from(1643723400)),
+        ];
+        let auth_event = EventBuilder::new(Kind::Custom(1), "get".to_string(), tags)
+            .sign_with_keys(&keypair)
+            .unwrap();
+
+        // Send a GET request to retrieve the blob.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(&format!("/{}", file_hash))
+                    .header(
+                        "Authorization",
+                        format!(
+                            "Nostr {}",
+                            base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
+                        ),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Unauthorized (401).
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_blob_handler_test_blob_not_found() {
+        // Set up app config and axum router
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test file hash that does not exist in the database
+        let file_hash =
+            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
+
+        // Send a GET request to retrieve the blob.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(&format!("/{}", file_hash))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Not Found (404).
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_blob_handler_test_invalid_hash_string() {
+        // Set up app config and axum router
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Send a GET request to retrieve the blob.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri("/an-invalid-hash")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Not Found (404).
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn has_blob_handler_test() {
         // Set up app config and axum router
-        let app_state: AppState = set_up_app_state().await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // File hash used as filename
@@ -919,7 +1056,7 @@ mod tests {
     async fn list_blobs_handler_test() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
-        let app_state: AppState = set_up_app_state().await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // Create a test blob descriptor
@@ -972,10 +1109,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_blobs_handler_test_invalid_auth_event() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        // Activate auth requirement in list config
+        let (app_state, _temp_dir) =
+            set_up_app_state(ConfigBuilder::new().list(ListConfig { require_auth: true })).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test blob descriptor
+        let file_hash =
+            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
+        let blob_descriptor = BlobDescriptor {
+            url: format!("{}/{}", app_state.config.server_url, file_hash),
+            sha256: file_hash.clone(),
+            size: 1024,
+            r#type: Some("application/octet-stream".to_string()),
+            uploaded: 1643723400,
+        };
+
+        // Insert the blob descriptor into the database
+        sqlx::query(
+            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+            .bind(&blob_descriptor.url)
+            .bind(&blob_descriptor.sha256)
+            .bind(blob_descriptor.size)
+            .bind(&blob_descriptor.r#type)
+            .bind(blob_descriptor.uploaded)
+            .bind(keypair.public_key().to_hex())
+            .execute(&app_state.pool)
+            .await
+            .unwrap();
+
+        // Create a test auth event with invalid kind
+        let tags = vec![
+            Tag::hashtag("list"),
+            Tag::expiration(Timestamp::from(1643723400)),
+        ];
+        let auth_event = EventBuilder::new(Kind::Custom(1), "list".to_string(), tags)
+            .sign_with_keys(&keypair)
+            .unwrap();
+
+        // Send a GET request to list blobs.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(&format!("/list/{}", keypair.public_key().to_hex()))
+                    .header(
+                        "Authorization",
+                        format!(
+                            "Nostr {}",
+                            base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
+                        ),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify that the response status code is Unauthorized (401).
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn upload_blob_handler_test() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
-        let app_state: AppState = set_up_app_state().await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // Create a test blob
@@ -1026,10 +1229,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_blob_handler_test_mimetype_whitelist() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) = set_up_app_state(
+            ConfigBuilder::new()
+                .upload(UploadBlobConfig {
+                    enabled: true,
+                    max_size: 1024.0,
+                    public_key_filter: UploadPublicKeyConfig {
+                        enabled: false,
+                        mode: UploadFilterListMode::Whitelist,
+                        public_keys: vec![],
+                    },
+                    mimetype_filter: UploadMimeTypeConfig {
+                        enabled: true,
+                        mode: UploadFilterListMode::Whitelist,
+                        mime_types: vec!["image/jpeg".to_string()],
+                    },
+                }),
+        )
+            .await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test blob
+        let file_contents = b"Hello, World!";
+        let file_hash = get_sha256_hash(&Bytes::from(file_contents.to_vec()));
+
+        // Create timestamp for expiration tag
+        let timestamp = SystemTime::now()
+            .add(core::time::Duration::new(3600, 0))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set up tags needed in auth header
+        let tags = vec![
+            Tag::hashtag("upload"),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
+                vec![file_hash.to_owned()],
+            ),
+            Tag::expiration(Timestamp::from(timestamp)),
+        ];
+
+        // Create the auth header
+        let auth_header = generate_blossom_auth_header(keypair.clone(), "upload".to_string(), tags);
+
+        let request = Request::builder()
+            .method(http::Method::PUT)
+            .uri("/upload")
+            .header("Authorization", format!("Nostr {}", auth_header))
+            .header("Content-Type", "text/plain")
+            .body(Body::from(file_contents.to_vec()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
     async fn delete_blob_handler_test() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
-        let app_state: AppState = set_up_app_state().await;
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
         let app = create_router(app_state.clone()).await;
 
         // Create a test blob descriptor
@@ -1117,59 +1381,143 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// Sets up a test `AppState` instance with a temporary database and file directory.
-    ///
-    /// This method creates a temporary directory, sets up a SQLite database within it,
-    /// and creates a test `Config` instance with default values. It then returns an `AppState`
-    /// instance with the test configuration and database pool.
-    ///
-    /// The test configuration has the following properties:
-    ///
-    /// *   `database_directory`: The temporary directory where the database is stored.
-    /// *   `files_directory`: The temporary directory where files are stored.
-    /// *   `server_url`: "https://example.com".
-    /// *   `host`: "127.0.0.1:8080".
-    /// *   `get`: `GetBlobConfig` with `require_auth` set to `false`.
-    /// *   `upload`: `UploadBlobConfig` with `enabled` set to `true`, `max_size` set to 1024.0,
-    ///     and default public key and MIME type filter configurations.
-    /// *   `list`: `ListConfig` with `require_auth` set to `false`.
-    /// *   `mirror`: `MirrorConfig` with `enable` set to `false`.
-    ///
-    /// This method is intended for use in tests to create a test `AppState` instance with a
-    /// temporary database and file directory.
-    async fn set_up_app_state() -> AppState {
-        let temp_dir = temp_dir();
-        let db_dir = temp_dir.as_path();
-        let db_url = format!("sqlite://{}", db_dir.join("test.db").display());
-        let pool = set_up_sqlite_db(db_url).await.unwrap();
+    #[tokio::test]
+    async fn delete_blob_handler_test_invalid_auth_event() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
 
-        let config = Config {
-            database_directory: db_dir.to_string_lossy().into(),
-            files_directory: temp_dir.as_path().join("files").to_string_lossy().into(),
-            server_url: "https://example.com".to_string(),
-            host: "127.0.0.1:8080".to_string(),
-            get: GetBlobConfig {
-                require_auth: false,
-            },
-            upload: UploadBlobConfig {
-                enabled: true,
-                max_size: 1024.0,
-                public_key_filter: UploadPublicKeyConfig {
-                    enabled: false,
-                    mode: UploadFilterListMode::Whitelist,
-                    public_keys: vec![],
-                },
-                mimetype_filter: UploadMimeTypeConfig {
-                    enabled: false,
-                    mode: UploadFilterListMode::Whitelist,
-                    mime_types: vec![],
-                },
-            },
-            list: ListConfig {
-                require_auth: false,
-            },
-            mirror: MirrorConfig { enable: false },
+        // Create a test blob descriptor
+        let file_hash =
+            "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
+        let blob_descriptor = BlobDescriptor {
+            url: format!("{}/{}", app_state.config.server_url, file_hash),
+            sha256: file_hash.clone(),
+            size: 1024,
+            r#type: Some("application/octet-stream".to_string()),
+            uploaded: 1643723400,
         };
+
+        // Insert the blob descriptor into the database
+        sqlx::query(
+            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+            .bind(&blob_descriptor.url)
+            .bind(&blob_descriptor.sha256)
+            .bind(blob_descriptor.size)
+            .bind(&blob_descriptor.r#type)
+            .bind(blob_descriptor.uploaded)
+            .bind(keypair.public_key().to_hex())
+            .execute(&app_state.pool)
+            .await
+            .unwrap();
+
+        // Create a test auth event with invalid kind
+        let tags = vec![
+            Tag::hashtag("delete"),
+            Tag::expiration(Timestamp::from(1643723400)),
+        ];
+        let auth_event = EventBuilder::new(Kind::Custom(1), "delete".to_string(), tags)
+            .sign_with_keys(&keypair)
+            .unwrap();
+
+        // Send DELETE request to our handler
+        let request = Request::builder()
+            .method(http::Method::DELETE)
+            .uri(&format!("/{}", file_hash))
+            .header(
+                "Authorization",
+                format!(
+                    "Nostr {}",
+                    base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
+                ),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        // Verify expected HTTP response status
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn mirror_blob_handler_test_invalid_auth_event() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        // Enable mirror endpoint
+        let (app_state, _temp_dir) =
+            set_up_app_state(ConfigBuilder::new().mirror(MirrorConfig { enable: true })).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create a test auth event with invalid kind
+        let tags = vec![
+            Tag::hashtag("upload"),
+            Tag::expiration(Timestamp::from(1643723400)),
+        ];
+        let auth_event = EventBuilder::new(Kind::Custom(1), "upload".to_string(), tags)
+            .sign_with_keys(&keypair)
+            .unwrap();
+
+        let mirror_request = MirrorRequest {
+            url: "https://example.com/blob".to_string(),
+        };
+
+        let request = Request::builder()
+            .method(http::Method::PUT)
+            .uri("/mirror")
+            .header(
+                "Authorization",
+                format!(
+                    "Nostr {}",
+                    base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
+                ),
+            )
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_string(&mirror_request).unwrap())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Sets up the application state for testing purposes.
+    ///
+    /// This function creates a temporary directory, sets up a SQLite database within it, and creates the necessary directories for storing files.
+    ///
+    /// # Parameters
+    ///
+    /// * `config_builder`: A `ConfigBuilder` instance used to construct the application configuration.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the `AppState` instance and the `TempDir` instance used to create the temporary directory.
+    ///
+    /// # Panics
+    ///
+    /// If an error occurs while setting up the test database, this function will panic with an error message.
+    ///
+    async fn set_up_app_state(config_builder: ConfigBuilder) -> (AppState, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+
+        let db_url = format!("sqlite://{}", temp_dir.path().join("test.db").display());
+
+        let pool_result = set_up_sqlite_db(db_url).await;
+
+        let pool = match pool_result {
+            Ok(pool) => pool,
+            Err(e) => {
+                eprintln!("Error setting up test DB: {:?}", e);
+                panic!("Error setting up test DB");
+            }
+        };
+
+        let files_dir = temp_dir.path().join("files").to_string_lossy().to_string();
+        let config = config_builder
+            .database_directory(temp_dir.path().display().to_string())
+            .files_directory(files_dir)
+            .build();
 
         // Ensure the blobs directory exists
         match create_directory_if_not_exists(&config.files_directory) {
@@ -1189,7 +1537,7 @@ mod tests {
             }
         }
 
-        AppState { config, pool }
+        (AppState { config, pool }, temp_dir)
     }
 
     fn generate_blossom_auth_header(keys: Keys, action: String, tags: Vec<Tag>) -> String {
@@ -1198,5 +1546,155 @@ mod tests {
             .unwrap()
             .as_json();
         base64::engine::general_purpose::STANDARD.encode(json_event)
+    }
+
+    /// A builder for creating a `Config` instance.
+    ///
+    /// This builder allows you to set individual fields of the `Config` struct,
+    /// and then build a complete `Config` instance with default values for any
+    /// fields that were not explicitly set. The goal of this builder is to make
+    /// it easy to create a server config for test purposes while maintaining
+    /// clean and easy to read code.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let config = ConfigBuilder::new()
+    ///     .database_directory("/path/to/db".to_string())
+    ///     .files_directory("/path/to/files".to_string())
+    ///     .server_url("https://example.com".to_string())
+    ///     .build();
+    /// ```
+    struct ConfigBuilder {
+        database_directory: Option<String>,
+        files_directory: Option<String>,
+        server_url: Option<String>,
+        host: Option<String>,
+        get: Option<GetBlobConfig>,
+        upload: Option<UploadBlobConfig>,
+        list: Option<ListConfig>,
+        mirror: Option<MirrorConfig>,
+    }
+
+    impl ConfigBuilder {
+        /// Creates a new `ConfigBuilder` instance.
+        fn new() -> Self {
+            Self {
+                database_directory: None,
+                files_directory: None,
+                server_url: None,
+                host: None,
+                get: None,
+                upload: None,
+                list: None,
+                mirror: None,
+            }
+        }
+
+        /// Sets the database directory.
+        fn database_directory(mut self, dir: String) -> Self {
+            self.database_directory = Some(dir);
+            self
+        }
+
+        /// Sets the files directory.
+        fn files_directory(mut self, dir: String) -> Self {
+            self.files_directory = Some(dir);
+            self
+        }
+
+        /// Sets the server URL.
+        fn server_url(mut self, url: String) -> Self {
+            self.server_url = Some(url);
+            self
+        }
+
+        /// Sets the host.
+        fn host(mut self, host: String) -> Self {
+            self.host = Some(host);
+            self
+        }
+
+        /// Sets the get blob config.
+        fn get(mut self, get: GetBlobConfig) -> Self {
+            self.get = Some(get);
+            self
+        }
+
+        /// Sets the upload blob config.
+        fn upload(mut self, upload: UploadBlobConfig) -> Self {
+            self.upload = Some(upload);
+            self
+        }
+
+        /// Sets the list config.
+        fn list(mut self, list: ListConfig) -> Self {
+            self.list = Some(list);
+            self
+        }
+
+        /// Sets the mirror config.
+        fn mirror(mut self, mirror: MirrorConfig) -> Self {
+            self.mirror = Some(mirror);
+            self
+        }
+
+        /// Builds a complete `Config` instance.
+        ///
+        /// This function takes the values set on the `ConfigBuilder` instance and uses them to create a
+        /// `Config` instance. Any fields that were not explicitly set will be given default values.
+        ///
+        /// The default values are as follows:
+        ///
+        /// *   `database_directory`: "/tmp/cherryserver/db/"
+        /// *   `files_directory`: "/tmp/cherryserver/files/"
+        /// *   `server_url`: "https://example.com"
+        /// *   `host`: "127.0.0.1:8080"
+        /// *   `get`: `GetBlobConfig` with `require_auth` set to `false`
+        /// *   `upload`: `UploadBlobConfig` with `enabled` set to `true`, `max_size` set to `1024.0`, and
+        ///     default public key and MIME type filter configurations.
+        /// *   `list`: `ListConfig` with `require_auth` set to `false`
+        /// *   `mirror`: `MirrorConfig` with `enable` set to `false`
+        ///
+        /// # Returns
+        ///
+        /// A complete `Config` instance.
+        fn build(self) -> Config {
+            Config {
+                database_directory: self
+                    .database_directory
+                    .unwrap_or_else(|| "/tmp/cherryserver/db/".to_string()),
+                files_directory: self
+                    .files_directory
+                    .unwrap_or_else(|| "/tmp/cherryserver/files/".to_string()),
+                server_url: self
+                    .server_url
+                    .unwrap_or_else(|| "https://example.com".to_string()),
+                host: self.host.unwrap_or_else(|| "127.0.0.1:8080".to_string()),
+                get: self.get.unwrap_or_else(|| GetBlobConfig {
+                    require_auth: false,
+                }),
+                upload: self.upload.unwrap_or_else(|| UploadBlobConfig {
+                    enabled: true,
+                    max_size: 1024.0,
+                    public_key_filter: UploadPublicKeyConfig {
+                        enabled: false,
+                        mode: UploadFilterListMode::Whitelist,
+                        public_keys: vec![],
+                    },
+                    mimetype_filter: UploadMimeTypeConfig {
+                        enabled: false,
+                        mode: UploadFilterListMode::Whitelist,
+                        mime_types: vec![],
+                    },
+                }),
+                list: self.list.unwrap_or_else(|| ListConfig {
+                    require_auth: false,
+                }),
+                mirror: self
+                    .mirror
+                    .unwrap_or_else(|| MirrorConfig { enable: false }),
+            }
+        }
     }
 }
