@@ -931,7 +931,7 @@ mod tests {
             &file_hash,
             Bytes::from(file_contents.to_vec()),
         )
-            .unwrap();
+        .unwrap();
 
         // Create a test auth event with invalid kind
         let tags = vec![
@@ -1232,23 +1232,21 @@ mod tests {
     async fn upload_blob_handler_test_mimetype_whitelist() {
         // Set up app config, keypair and axum router
         let keypair = Keys::generate();
-        let (app_state, _temp_dir) = set_up_app_state(
-            ConfigBuilder::new()
-                .upload(UploadBlobConfig {
+        let (app_state, _temp_dir) =
+            set_up_app_state(ConfigBuilder::new().upload(UploadBlobConfig {
+                enabled: true,
+                max_size: 1024.0,
+                public_key_filter: UploadPublicKeyConfig {
+                    enabled: false,
+                    mode: UploadFilterListMode::Whitelist,
+                    public_keys: vec![],
+                },
+                mimetype_filter: UploadMimeTypeConfig {
                     enabled: true,
-                    max_size: 1024.0,
-                    public_key_filter: UploadPublicKeyConfig {
-                        enabled: false,
-                        mode: UploadFilterListMode::Whitelist,
-                        public_keys: vec![],
-                    },
-                    mimetype_filter: UploadMimeTypeConfig {
-                        enabled: true,
-                        mode: UploadFilterListMode::Whitelist,
-                        mime_types: vec!["image/jpeg".to_string()],
-                    },
-                }),
-        )
+                    mode: UploadFilterListMode::Whitelist,
+                    mime_types: vec!["image/jpeg".to_string()],
+                },
+            }))
             .await;
         let app = create_router(app_state.clone()).await;
 
