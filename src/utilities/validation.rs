@@ -246,4 +246,90 @@ mod tests {
 
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_validate_auth_event_x_missing_filehash_tag() {
+        let event = EventBuilder::new(Kind::Custom(24242), "test", vec![])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+
+        let result = validate_auth_event_x(&event, "hash");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::FilehashTagMissing));
+    }
+
+    #[test]
+    fn test_validate_auth_event_x_filehash_not_found() {
+        let event = EventBuilder::new(
+            Kind::Custom(24242),
+            "test",
+            vec![Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
+                Some("other_hash".to_string()),
+            )],
+        )
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+
+        let result = validate_auth_event_x(&event, "hash");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::FileHashMissing(_)));
+    }
+
+    #[test]
+    fn test_validate_auth_event_x_filehash_found() {
+        let event = EventBuilder::new(
+            Kind::Custom(24242),
+            "test",
+            vec![Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
+                Some("hash".to_string()),
+            )],
+        )
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+
+        let result = validate_auth_event_x(&event, "hash");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hash");
+    }
+
+    #[test]
+    fn test_validate_file_hash_invalid_hash() {
+        let event = EventBuilder::new(
+            Kind::Custom(24242),
+            "test",
+            vec![Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
+                Some("other_hash".to_string()),
+            )],
+        )
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+
+        let body = Bytes::from("Hello, World!");
+        let result = validate_file_hash(&event, &body);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::FileHashMissing(_)));
+    }
+
+    #[test]
+    fn test_validate_file_hash_valid_hash() {
+        let body = Bytes::from("Hello, World!");
+        let hash = get_sha256_hash(&body);
+        let event = EventBuilder::new(
+            Kind::Custom(24242),
+            "test",
+            vec![Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
+                Some(hash.to_string()),
+            )],
+        )
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+
+        let result = validate_file_hash(&event, &body);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), hash);
+    }
 }
