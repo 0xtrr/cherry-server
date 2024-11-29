@@ -14,7 +14,7 @@ use crate::{utilities, AppState, BlobDescriptor};
 use axum::body::Bytes;
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
@@ -41,14 +41,30 @@ pub struct AuthEvent {
     pub sig: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ErrorResponse {
-    pub message: String,
+/// Used in authorization header inspection
+fn build_unauthorized_error_response(message: &str) -> Response {
+    build_error_response(StatusCode::UNAUTHORIZED, message)
 }
 
-/// Used in authorization header inspection
-fn unauthorized_error_response(message: String) -> (StatusCode, Json<ErrorResponse>) {
-    (StatusCode::UNAUTHORIZED, Json(ErrorResponse { message }))
+fn build_not_found_error_response(message: &str) -> Response {
+    build_error_response(StatusCode::NOT_FOUND, message)
+}
+
+fn build_bad_request_error_response(message: &str) -> Response {
+    build_error_response(StatusCode::BAD_REQUEST, message)
+}
+
+fn build_conflict_error_response(message: &str) -> Response {
+    build_error_response(StatusCode::CONFLICT, message)
+}
+fn build_internal_server_error_response(message: &str) -> Response {
+    build_error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
+}
+
+fn build_error_response(status_code: StatusCode, message: &str) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Reason", HeaderValue::from_str(message).unwrap());
+    (status_code, headers).into_response()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,7 +79,7 @@ impl<S> FromRequestParts<S> for AuthHeader
 where
     S: Send + Sync,
 {
-    type Rejection = (StatusCode, Json<ErrorResponse>);
+    type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         let auth_header = if let Some(auth_header) = parts.headers.get("Authorization") {
@@ -74,11 +90,11 @@ where
 
         let auth_str = auth_header
             .to_str()
-            .map_err(|_| unauthorized_error_response("Invalid Authorization header".to_string()))?;
+            .map_err(|_| build_unauthorized_error_response("Invalid Authorization header"))?;
 
         if !auth_str.starts_with("Nostr") {
-            return Err(unauthorized_error_response(
-                "Invalid Authorization header".to_string(),
+            return Err(build_unauthorized_error_response(
+                "Invalid Authorization header",
             ));
         }
 
@@ -86,20 +102,21 @@ where
         let decoded_event = general_purpose::STANDARD
             .decode(encoded_event)
             .map_err(|err| {
-                unauthorized_error_response(format!("Invalid base64 encoding: {}", err))
+                build_unauthorized_error_response(
+                    format!("Invalid base64 encoding: {}", err).as_str(),
+                )
             })?;
 
         match serde_json::from_slice::<Event>(&decoded_event) {
             Ok(event) => match event.verify_signature() {
                 true => Ok(AuthHeader(Some(event))),
-                false => Err(unauthorized_error_response(
-                    "Invalid signature in authorization event".to_string(),
+                false => Err(build_unauthorized_error_response(
+                    "Invalid signature in authorization event",
                 )),
             },
-            Err(err) => Err(unauthorized_error_response(format!(
-                "Invalid authorization event: {}",
-                err
-            ))),
+            Err(err) => Err(build_unauthorized_error_response(
+                format!("Invalid authorization event: {}", err).as_str(),
+            )),
         }
     }
 }
@@ -144,10 +161,7 @@ pub async fn get_blob_handler(
             Some(ref auth_event) => {
                 // Validate kind, created_at, expiration tag and t-tag (action)
                 if let Err(error_msg) = validate_auth_event(auth_event, "get") {
-                    let json = Json(ErrorResponse {
-                        message: error_msg.to_string(),
-                    });
-                    return (StatusCode::UNAUTHORIZED, json).into_response();
+                    return build_unauthorized_error_response(error_msg.to_string().as_str());
                 }
 
                 // Verify x/server tag
@@ -162,19 +176,12 @@ pub async fn get_blob_handler(
                 });
 
                 if !has_server_tag && !has_x_tag {
-                    let json = Json(ErrorResponse {
-                        message: "No matching x tag or server tag in authorization event"
-                            .to_string(),
-                    });
-                    return (StatusCode::UNAUTHORIZED, json).into_response();
+                    return build_unauthorized_error_response(
+                        "No matching x tag or server tag in authorization event",
+                    );
                 }
             }
-            None => {
-                let json = Json(ErrorResponse {
-                    message: "Missing authorization event".to_string(),
-                });
-                return (StatusCode::UNAUTHORIZED, json).into_response();
-            }
+            None => return build_unauthorized_error_response("Missing authorization event"),
         }
     }
 
@@ -198,21 +205,14 @@ pub async fn get_blob_handler(
 
     // Return the blob descriptor if it was found, a 404 if not found or a 500 if something else went wrong.
     let blob_descriptor = match result {
-        Ok(descriptor) => {
-            println!("DESCRIPTOR FOUND: {:?}", descriptor);
-            descriptor
-        }
-        Err(Error::RowNotFound) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(descriptor) => descriptor,
+        Err(Error::RowNotFound) => return build_not_found_error_response("Blob not found"),
         Err(e) => {
             eprintln!("{:?}", e);
             error!("Error fetching blob descriptor: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    message: "Error fetching blob descriptor. Contact system admin.".to_string(),
-                }),
-            )
-                .into_response();
+            return build_internal_server_error_response(
+                "Error fetching blob descriptor. Contact system admin.",
+            );
         }
     };
 
@@ -223,33 +223,19 @@ pub async fn get_blob_handler(
             Err(e) => {
                 return match e {
                     utilities::file::Error::ReadFile => {
-                        let error_response = ErrorResponse {
-                            message: "Failed to read blob".to_string(),
-                        };
-                        let json = Json(error_response);
-                        (StatusCode::INTERNAL_SERVER_ERROR, json).into_response()
+                        return build_internal_server_error_response("Failed to read blob");
                     }
                     utilities::file::Error::FileNotFound => {
-                        let error_response = ErrorResponse {
-                            message: "Blob not found".to_string(),
-                        };
-                        let json = Json(error_response);
-                        (StatusCode::NOT_FOUND, json).into_response()
+                        return build_not_found_error_response("Blob not found");
                     }
                     utilities::file::Error::OpenFile => {
-                        let error_response = ErrorResponse {
-                            message: "Failed to read blob".to_string(),
-                        };
-                        let json = Json(error_response);
-                        (StatusCode::INTERNAL_SERVER_ERROR, json).into_response()
+                        return build_internal_server_error_response("Failed to open blob");
                     }
                     _ => {
                         // TODO: This should never happen, maybe this handling needs some refactoring
-                        let error_response = ErrorResponse {
-                            message: "Something went wrong".to_string(),
-                        };
-                        let json = Json(error_response);
-                        (StatusCode::INTERNAL_SERVER_ERROR, json).into_response()
+                        build_internal_server_error_response(
+                            "Something went wrong, contact system admin.",
+                        )
                     }
                 };
             }
@@ -274,9 +260,9 @@ pub async fn has_blob_handler(
     let (file_hash, _filetype) = split_filehash_and_filetype(file_hash);
     let file_path = format!("{}/{}", app_state.config.files_directory, file_hash);
     if PathBuf::from(&file_path).exists() {
-        StatusCode::OK
+        StatusCode::OK.into_response()
     } else {
-        StatusCode::NOT_FOUND
+        build_not_found_error_response("File not found")
     }
 }
 
@@ -297,34 +283,23 @@ pub async fn list_blobs_handler(
             Ok(pubkey) => pubkey,
             Err(err) => {
                 error!("{}", err);
-                let json = Json(ErrorResponse {
-                    message: "Unable to parse public key in path".to_string(),
-                });
-                return (StatusCode::BAD_REQUEST, json).into_response();
+                return build_bad_request_error_response("Unable to parse public key in path");
             }
         };
         match auth_event {
             Some(ref auth_event) => {
                 if auth_event.pubkey != path_public_key {
-                    let json = Json(ErrorResponse {
-                        message: "Public key mismatch in authorization event and url path"
-                            .to_string(),
-                    });
-                    return (StatusCode::UNAUTHORIZED, json).into_response();
+                    return build_unauthorized_error_response(
+                        "Public key mismatch in authorization event and url path",
+                    );
                 }
                 // Validate kind, expiration tag and t-tag (action)
                 if let Err(error_msg) = validate_auth_event(auth_event, "list") {
-                    let json = Json(ErrorResponse {
-                        message: error_msg.to_string(),
-                    });
-                    return (StatusCode::UNAUTHORIZED, json).into_response();
+                    return build_unauthorized_error_response(error_msg.to_string().as_str());
                 }
             }
             None => {
-                let json = Json(ErrorResponse {
-                    message: "Missing authorization event".to_string(),
-                });
-                return (StatusCode::UNAUTHORIZED, json).into_response();
+                return build_unauthorized_error_response("Missing authorization event");
             }
         }
     }
@@ -438,20 +413,14 @@ pub async fn upload_blob_handler(
     let (auth_event, content_type) = match upload_blob_prechecks(&app_state, auth_event, &headers) {
         Ok(auth_event) => auth_event,
         Err((code, message)) => {
-            let json = Json(ErrorResponse { message });
-            return (code, json).into_response();
+            return build_error_response(code, message.as_str());
         }
     };
 
     // Validate the file hash against the hash defined in the authorization event
     let file_hash = match validate_file_hash(&auth_event, &body) {
         Ok(file_hash) => file_hash,
-        Err(error_msg) => {
-            let json = Json(ErrorResponse {
-                message: error_msg.to_string(),
-            });
-            return (StatusCode::BAD_REQUEST, json).into_response();
-        }
+        Err(error_msg) => return build_bad_request_error_response(error_msg.to_string().as_str()),
     };
 
     // Check that the size of the blob does not exceed the limit set in the upload config
@@ -459,13 +428,13 @@ pub async fn upload_blob_handler(
     // we have the actual size of the blob, which is not necessarily the same.
     let blob_size_in_mb = bytes_to_mb(body.len() as f64);
     if blob_size_in_mb > app_state.config.upload.max_size {
-        let json = Json(ErrorResponse {
-            message: format!(
+        return build_bad_request_error_response(
+            format!(
                 "Blob size is {} MB, max upload size is {} MB",
                 blob_size_in_mb, app_state.config.upload.max_size
-            ),
-        });
-        return (StatusCode::BAD_REQUEST, json).into_response();
+            )
+            .as_str(),
+        );
     }
 
     // Write blob to file system
@@ -474,10 +443,7 @@ pub async fn upload_blob_handler(
     match write_blob_to_file(file_storage_dir, &file_hash, body.clone()) {
         Ok(_) => {}
         Err(error_msg) => {
-            let json = Json(ErrorResponse {
-                message: error_msg.to_string(),
-            });
-            return (StatusCode::INTERNAL_SERVER_ERROR, json).into_response();
+            return build_internal_server_error_response(error_msg.to_string().as_str());
         }
     }
 
@@ -515,28 +481,20 @@ pub async fn upload_blob_handler(
             .await;
 
             if let Err(e) = reference_update_result {
-                let error_message = ErrorResponse {
-                    // TODO: Consider a better error message to return to the user
-                    message: format!("Failed to update file reference count: {}", e),
-                };
-                let json = Json(error_message);
-                return (StatusCode::INTERNAL_SERVER_ERROR, json).into_response();
+                error!("{}", e);
+                return build_internal_server_error_response(
+                    "Failed to update file reference count",
+                );
             }
             Json(blob_descriptor).into_response()
         }
-        Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+        Err(Error::Database(db_err)) if db_err.is_unique_violation() => {
             // Blob already uploaded by this public key.
             // Return the blob descriptor again, but without increasing the
             // reference count.
             Json(blob_descriptor).into_response()
         }
-        Err(_) => {
-            let error_message = ErrorResponse {
-                message: "Failed to insert blob descriptor".to_string(),
-            };
-            let json = Json(error_message);
-            (StatusCode::INTERNAL_SERVER_ERROR, json).into_response()
-        }
+        Err(_) => build_internal_server_error_response("Failed to insert blob descriptor"),
     }
 }
 
@@ -547,7 +505,7 @@ pub async fn upload_head_handler(
 ) -> impl IntoResponse {
     match upload_blob_prechecks(&app_state, auth_event, &headers) {
         Ok(_) => StatusCode::OK.into_response(),
-        Err((code, message)) => (code, [("X-Reason", message)]).into_response(),
+        Err((code, message)) => build_error_response(code, message.as_str()),
     }
 }
 
@@ -560,10 +518,9 @@ pub async fn delete_blob_handler(
     let auth_event = match auth_event {
         Some(auth_event) => auth_event,
         None => {
-            let json = Json(ErrorResponse {
-                message: "Authorization event required to delete a blob".to_string(),
-            });
-            return (StatusCode::UNAUTHORIZED, json).into_response();
+            return build_unauthorized_error_response(
+                "Authorization event required to delete a blob",
+            );
         }
     };
 
@@ -573,18 +530,12 @@ pub async fn delete_blob_handler(
     match validate_auth_event(&auth_event, "delete") {
         Ok(_) => {}
         Err(error_msg) => {
-            let json = Json(ErrorResponse {
-                message: error_msg.to_string(),
-            });
-            return (StatusCode::UNAUTHORIZED, json).into_response();
+            return build_unauthorized_error_response(error_msg.to_string().as_str());
         }
     }
 
     if let Err(err) = validate_auth_event_x(&auth_event, &path_file_hash) {
-        let json = Json(ErrorResponse {
-            message: err.to_string(),
-        });
-        return (StatusCode::UNAUTHORIZED, json).into_response();
+        return build_unauthorized_error_response(err.to_string().as_str());
     }
 
     // Ensure the file exists in the database
@@ -596,17 +547,11 @@ pub async fn delete_blob_handler(
     {
         Ok(Some(row)) => row,
         Ok(None) => {
-            let error_response = ErrorResponse {
-                message: "Blob not found".to_string(),
-            };
-            return (StatusCode::NOT_FOUND, Json(error_response)).into_response();
+            return build_not_found_error_response("Blob not found");
         }
         Err(e) => {
             error!("{}", e);
-            let error_response = ErrorResponse {
-                message: "Database error".to_string(),
-            };
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
+            return build_internal_server_error_response("Unexpected database error");
         }
     };
 
@@ -620,10 +565,7 @@ pub async fn delete_blob_handler(
         Ok(_) => {}
         Err(e) => {
             error!("{}", e);
-            let error_response = ErrorResponse {
-                message: "Failed to delete blob descriptor".to_string(),
-            };
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
+            return build_internal_server_error_response("Failed to delete blob descriptor");
         }
     };
 
@@ -638,10 +580,7 @@ pub async fn delete_blob_handler(
         Ok(_) => {}
         Err(e) => {
             error!("{}", e);
-            let error_response = ErrorResponse {
-                message: "Failed to update reference count".to_string(),
-            };
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
+            return build_internal_server_error_response("Failed to update reference count");
         }
     };
 
@@ -659,10 +598,7 @@ pub async fn delete_blob_handler(
             Ok(_) => {}
             Err(error_msg) => {
                 error!("{}", error_msg);
-                let error_response = ErrorResponse {
-                    message: error_msg.to_string(),
-                };
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
+                return build_internal_server_error_response(error_msg.to_string().as_str());
             }
         }
     }
@@ -677,20 +613,16 @@ pub async fn mirror_blob_handler(
 ) -> impl IntoResponse {
     // Return error if not enabled
     if !app_state.config.mirror.enable {
-        let json = Json(ErrorResponse {
-            message: "Mirror endpoint is not enabled".to_string(),
-        });
-        return (StatusCode::NOT_FOUND, json).into_response();
+        return build_not_found_error_response("Mirror endpoint is not enabled");
     }
 
     // Get the auth event from HTTP headers
     let auth_event = match auth_event {
         Some(auth_event) => auth_event,
         None => {
-            let json = Json(ErrorResponse {
-                message: "Authorization event required to upload a blob".to_string(),
-            });
-            return (StatusCode::UNAUTHORIZED, json).into_response();
+            return build_unauthorized_error_response(
+                "Authorization event required to upload a blob",
+            );
         }
     };
 
@@ -698,10 +630,7 @@ pub async fn mirror_blob_handler(
     match validate_auth_event(&auth_event, "upload") {
         Ok(_) => {}
         Err(error_msg) => {
-            let json = Json(ErrorResponse {
-                message: error_msg.to_string(),
-            });
-            return (StatusCode::UNAUTHORIZED, json).into_response();
+            return build_unauthorized_error_response(error_msg.to_string().as_str());
         }
     }
 
@@ -709,11 +638,7 @@ pub async fn mirror_blob_handler(
     let response = match client.get(&mirror_request.url).send().await {
         Ok(response) => response,
         Err(_) => {
-            let error_response = ErrorResponse {
-                message: "Failed to download blob".to_string(),
-            };
-            let json = Json(error_response);
-            return (StatusCode::BAD_REQUEST, json).into_response();
+            return build_bad_request_error_response("Failed to download blob");
         }
     };
 
@@ -726,11 +651,7 @@ pub async fn mirror_blob_handler(
     let blob_data = match response.bytes().await {
         Ok(bytes) => bytes,
         Err(_) => {
-            let error_response = ErrorResponse {
-                message: "Failed to read blob data".to_string(),
-            };
-            let json = Json(error_response);
-            return (StatusCode::BAD_REQUEST, json).into_response();
+            return build_bad_request_error_response("Failed to read blob data");
         }
     };
 
@@ -738,10 +659,7 @@ pub async fn mirror_blob_handler(
     let file_hash = match validate_file_hash(&auth_event, &blob_data) {
         Ok(file_hash) => file_hash,
         Err(error_msg) => {
-            let json = Json(ErrorResponse {
-                message: error_msg.to_string(),
-            });
-            return (StatusCode::BAD_REQUEST, json).into_response();
+            return build_bad_request_error_response(error_msg.to_string().as_str());
         }
     };
 
@@ -749,20 +667,12 @@ pub async fn mirror_blob_handler(
     let mut file = match File::create(&file_path) {
         Ok(file) => file,
         Err(_) => {
-            let error_message = ErrorResponse {
-                message: "Failed to write blob".to_string(),
-            };
-            let json = Json(error_message);
-            return (StatusCode::INTERNAL_SERVER_ERROR, json).into_response();
+            return build_internal_server_error_response("Failed to write blob");
         }
     };
 
     if file.write_all(&blob_data).is_err() {
-        let error_message = ErrorResponse {
-            message: "Failed to write blob".to_string(),
-        };
-        let json = Json(error_message);
-        return (StatusCode::INTERNAL_SERVER_ERROR, json).into_response();
+        return build_internal_server_error_response("Failed to write blob");
     }
 
     let blob_descriptor = BlobDescriptor {
@@ -787,20 +697,10 @@ pub async fn mirror_blob_handler(
 
     match result {
         Ok(_) => Json(blob_descriptor).into_response(),
-        Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
-            let error_message = ErrorResponse {
-                message: "Blob already mirrored by this public key".to_string(),
-            };
-            let json = Json(error_message);
-            (StatusCode::CONFLICT, json).into_response()
+        Err(Error::Database(db_err)) if db_err.is_unique_violation() => {
+            build_conflict_error_response("Blob already mirrored by this public key")
         }
-        Err(_) => {
-            let error_message = ErrorResponse {
-                message: "Failed to insert blob descriptor".to_string(),
-            };
-            let json = Json(error_message);
-            (StatusCode::INTERNAL_SERVER_ERROR, json).into_response()
-        }
+        Err(_) => build_internal_server_error_response("Failed to insert blob descriptor"),
     }
 }
 
@@ -967,6 +867,10 @@ mod tests {
 
         // Verify that the response status code is Unauthorized (401).
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("X-Reason").unwrap(),
+            "Authorization event has invalid kind: 1"
+        )
     }
 
     #[tokio::test]
@@ -1015,6 +919,10 @@ mod tests {
 
         // Verify that the response status code is Not Found (404).
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get("X-Reason").unwrap(),
+            "Blob not found"
+        );
     }
 
     #[tokio::test]
@@ -1172,6 +1080,10 @@ mod tests {
 
         // Verify that the response status code is Unauthorized (401).
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("X-Reason").unwrap(),
+            "Authorization event has invalid kind: 1"
+        );
     }
 
     #[tokio::test]
@@ -1285,6 +1197,10 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            response.headers().get("X-Reason").unwrap(),
+            "MIME type text/plain not allowed to be uploaded to this server"
+        );
     }
 
     #[tokio::test]
@@ -1437,6 +1353,10 @@ mod tests {
 
         // Verify expected HTTP response status
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("X-Reason").unwrap(),
+            "Authorization event has invalid kind: 1"
+        );
     }
 
     #[tokio::test]
@@ -1478,6 +1398,10 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("X-Reason").unwrap(),
+            "Authorization event has invalid kind: 1"
+        );
     }
 
     /// Sets up the application state for testing purposes.

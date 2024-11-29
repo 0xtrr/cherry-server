@@ -23,7 +23,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidKind(kind) => write!(f, "Invalid kind: {}", kind),
+            Error::InvalidKind(kind) => write!(f, "Authorization event has invalid kind: {}", kind),
             Error::AuthEventExpired => write!(f, "Authorization event expired"),
             Error::ExpirationTagMissing => write!(
                 f,
