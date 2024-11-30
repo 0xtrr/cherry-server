@@ -371,8 +371,8 @@ pub fn upload_blob_prechecks(
     // Only check validity if the header is present.
     // This is safe, because in the PUT /upload implementation the actual blob size is checked.
     if let Some(content_length) = content_length {
-        if let Ok(content_length) = content_length.parse::<f64>() {
-            let blob_size_in_mb = bytes_to_mb(content_length);
+        if let Ok(content_length) = content_length.parse::<u64>() {
+            let blob_size_in_mb = bytes_to_mb(content_length as f64);
             let max_size = app_state.config.upload.max_size;
             if blob_size_in_mb.ceil() > max_size {
                 return Err((
