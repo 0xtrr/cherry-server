@@ -41,7 +41,6 @@ pub struct AuthEvent {
     pub sig: String,
 }
 
-/// Used in authorization header inspection
 fn build_unauthorized_error_response(message: &str) -> Response {
     build_error_response(StatusCode::UNAUTHORIZED, message)
 }
