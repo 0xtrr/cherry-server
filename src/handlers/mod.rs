@@ -372,9 +372,10 @@ pub fn upload_blob_prechecks(
     // Only check validity if the header is present.
     // This is safe, because in the PUT /upload implementation the actual blob size is checked.
     if let Some(content_length) = content_length {
-        if let Ok(content_length) = content_length.parse::<u64>() {
-            let blob_size_in_mb = bytes_to_mb(content_length as f64);
-            if blob_size_in_mb > app_state.config.upload.max_size {
+        if let Ok(content_length) = content_length.parse::<f64>() {
+            let blob_size_in_mb = bytes_to_mb(content_length);
+            let max_size = app_state.config.upload.max_size;
+            if blob_size_in_mb.ceil() > max_size {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     format!(
@@ -1404,6 +1405,306 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn upload_head_handler_test_enabled() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create timestamp for expiration tag
+        let timestamp = SystemTime::now()
+            .add(core::time::Duration::new(3600, 0))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set up tags needed in auth header
+        let tags = vec![
+            Tag::hashtag("upload"),
+            Tag::expiration(Timestamp::from(timestamp)),
+        ];
+
+        // Create the auth header
+        let auth_header = generate_blossom_auth_header(keypair.clone(), "upload".to_string(), tags);
+
+        let request = Request::builder()
+            .method(http::Method::HEAD)
+            .uri("/upload")
+            .header("Authorization", format!("Nostr {}", auth_header))
+            .header("Content-Type", "text/plain")
+            .header("Content-Length", "1024")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn upload_head_handler_test_disabled() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) =
+            set_up_app_state(ConfigBuilder::new().upload(UploadBlobConfig {
+                enabled: false,
+                max_size: 1024.0,
+                public_key_filter: UploadPublicKeyConfig {
+                    enabled: false,
+                    mode: UploadFilterListMode::Whitelist,
+                    public_keys: vec![],
+                },
+                mimetype_filter: UploadMimeTypeConfig {
+                    enabled: false,
+                    mode: UploadFilterListMode::Whitelist,
+                    mime_types: vec![],
+                },
+            }))
+            .await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create timestamp for expiration tag
+        let timestamp = SystemTime::now()
+            .add(core::time::Duration::new(3600, 0))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set up tags needed in auth header
+        let tags = vec![
+            Tag::hashtag("upload"),
+            Tag::expiration(Timestamp::from(timestamp)),
+        ];
+
+        // Create the auth header
+        let auth_header = generate_blossom_auth_header(keypair.clone(), "upload".to_string(), tags);
+
+        let request = Request::builder()
+            .method(http::Method::HEAD)
+            .uri("/upload")
+            .header("Authorization", format!("Nostr {}", auth_header))
+            .header("Content-Type", "text/plain")
+            .header("Content-Length", "1024")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get("X-Reason").unwrap(),
+            "Uploads are disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_head_handler_test_invalid_auth_event() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create timestamp for expiration tag
+        let timestamp = SystemTime::now()
+            .add(core::time::Duration::new(3600, 0))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set up tags needed in auth header
+        let tags = vec![
+            Tag::hashtag("get"),
+            Tag::expiration(Timestamp::from(timestamp)),
+        ];
+
+        // Create the auth header
+        let auth_event = EventBuilder::new(Kind::Custom(1), "upload".to_string(), tags)
+            .sign_with_keys(&keypair)
+            .unwrap();
+
+        let request = Request::builder()
+            .method(http::Method::HEAD)
+            .uri("/upload")
+            .header(
+                "Authorization",
+                format!(
+                    "Nostr {}",
+                    base64::engine::general_purpose::STANDARD.encode(auth_event.as_json())
+                ),
+            )
+            .header("Content-Type", "text/plain")
+            .header("Content-Length", "1024")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get("X-Reason")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Authorization event has invalid kind: 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_head_handler_test_invalid_content_length() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create timestamp for expiration tag
+        let timestamp = SystemTime::now()
+            .add(core::time::Duration::new(3600, 0))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set up tags needed in auth header
+        let tags = vec![
+            Tag::hashtag("upload"),
+            Tag::expiration(Timestamp::from(timestamp)),
+        ];
+
+        // Create the auth header
+        let auth_header = generate_blossom_auth_header(keypair.clone(), "upload".to_string(), tags);
+
+        let request = Request::builder()
+            .method(http::Method::HEAD)
+            .uri("/upload")
+            .header("Authorization", format!("Nostr {}", auth_header))
+            .header("Content-Type", "text/plain")
+            .header("Content-Length", "abc")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get("X-Reason")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Invalid Content-Length header"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_head_handler_test_content_length_too_large() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) = set_up_app_state(ConfigBuilder::new()).await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create timestamp for expiration tag
+        let timestamp = SystemTime::now()
+            .add(core::time::Duration::new(3600, 0))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set up tags needed in auth header
+        let tags = vec![
+            Tag::hashtag("upload"),
+            Tag::expiration(Timestamp::from(timestamp)),
+        ];
+
+        // Create the auth header
+        let auth_header = generate_blossom_auth_header(keypair.clone(), "upload".to_string(), tags);
+
+        let request = Request::builder()
+            .method(http::Method::HEAD)
+            .uri("/upload")
+            .header("Authorization", format!("Nostr {}", auth_header))
+            .header("Content-Type", "text/plain")
+            .header("Content-Length", "10485760") // 10 MB
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get("X-Reason")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Blob size is 10 MB, max upload size is 1 MB"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_head_handler_test_invalid_mime_type() {
+        // Set up app config, keypair and axum router
+        let keypair = Keys::generate();
+        let (app_state, _temp_dir) =
+            set_up_app_state(ConfigBuilder::new().upload(UploadBlobConfig {
+                enabled: true,
+                max_size: 1024.0,
+                public_key_filter: UploadPublicKeyConfig {
+                    enabled: false,
+                    mode: UploadFilterListMode::Whitelist,
+                    public_keys: vec![],
+                },
+                mimetype_filter: UploadMimeTypeConfig {
+                    enabled: true,
+                    mode: UploadFilterListMode::Whitelist,
+                    mime_types: vec!["image/jpeg".to_string()],
+                },
+            }))
+            .await;
+        let app = create_router(app_state.clone()).await;
+
+        // Create timestamp for expiration tag
+        let timestamp = SystemTime::now()
+            .add(core::time::Duration::new(3600, 0))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set up tags needed in auth header
+        let tags = vec![
+            Tag::hashtag("upload"),
+            Tag::expiration(Timestamp::from(timestamp)),
+        ];
+
+        // Create the auth header
+        let auth_header = generate_blossom_auth_header(keypair.clone(), "upload".to_string(), tags);
+
+        let request = Request::builder()
+            .method(http::Method::HEAD)
+            .uri("/upload")
+            .header("Authorization", format!("Nostr {}", auth_header))
+            .header("Content-Type", "text/plain")
+            .header("Content-Length", "1024")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            response
+                .headers()
+                .get("X-Reason")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "MIME type text/plain not allowed to be uploaded to this server"
+        );
+    }
+
     /// Sets up the application state for testing purposes.
     ///
     /// This function creates a temporary directory, sets up a SQLite database within it, and creates the necessary directories for storing files.
@@ -1598,7 +1899,7 @@ mod tests {
                 }),
                 upload: self.upload.unwrap_or_else(|| UploadBlobConfig {
                     enabled: true,
-                    max_size: 1024.0,
+                    max_size: 1.0,
                     public_key_filter: UploadPublicKeyConfig {
                         enabled: false,
                         mode: UploadFilterListMode::Whitelist,
