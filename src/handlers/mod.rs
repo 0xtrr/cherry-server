@@ -20,6 +20,7 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use base64::engine::general_purpose;
 use base64::Engine;
+use mime2ext::mime2ext;
 use nostr_sdk::{Event, PublicKey, SingleLetterTag, TagKind};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -447,9 +448,16 @@ pub async fn upload_blob_handler(
         }
     }
 
+    // Add an extension based on the MIME type
+    let suffix = content_type
+        .clone()
+        .and_then(|mime_type| mime2ext(mime_type))
+        .map(|ext| ".".to_string() + ext)
+        .unwrap_or("".to_string());
+
     // Define Blob Descriptor
     let blob_descriptor = BlobDescriptor {
-        url: format!("{}/{}", app_state.config.server_url, file_hash),
+        url: format!("{}/{}{}", app_state.config.server_url, file_hash, suffix),
         sha256: file_hash.clone(),
         size: body.len() as i64,
         r#type: content_type,
@@ -1135,6 +1143,10 @@ mod tests {
         assert_eq!(blob_descriptor.sha256, file_hash);
         assert_eq!(blob_descriptor.size, file_contents.len() as i64);
         assert_eq!(blob_descriptor.r#type, Some("text/plain".to_string()));
+        assert_eq!(
+            blob_descriptor.url,
+            format!("https://example.com/{}.txt", file_hash)
+        );
 
         let file_path = format!("{}/{}", app_state.config.files_directory, file_hash);
         assert!(Path::new(&file_path).exists());
