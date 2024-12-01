@@ -30,6 +30,7 @@ clap = { version = "4.5.21", features = ["derive"] }
 nostr-sdk = "0.36.0"
 http-body-util = "0.1.2"
 tempfile = "3.14.0"
+mime2ext = "0.1.53"
 
 [dev-dependencies]
 tower = { version = "0.5.1", features = ["util"] }
