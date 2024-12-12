@@ -13,11 +13,13 @@ It stores files right to disk and stores metadata in a sqlite database.
 
 | ID     | Status |
 |--------|--------|
-| BUD-01 | ✅      |
-| BUD-02 | ✅      |
+| BUD-01 | ✅     |
+| BUD-02 | ✅     |
 | BUD-03 | N/A    |
-| BUD-04 | ✅      |
-| BUD-06 | ✅      |
+| BUD-04 | ✅     |
+| BUD-05 | ❌     |
+| BUD-06 | ✅     |
+| BUD-08 | ❌     |
 
 
 ## Getting Started
