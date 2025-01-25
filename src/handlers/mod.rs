@@ -850,7 +850,8 @@ mod tests {
             ),
             Tag::expiration(Timestamp::from(1643723400)),
         ];
-        let auth_event = EventBuilder::new(Kind::Custom(1), "get".to_string(), tags)
+        let auth_event = EventBuilder::new(Kind::Custom(1), "get".to_string())
+            .tags(tags)
             .sign_with_keys(&keypair)
             .unwrap();
 
@@ -1063,7 +1064,8 @@ mod tests {
             Tag::hashtag("list"),
             Tag::expiration(Timestamp::from(1643723400)),
         ];
-        let auth_event = EventBuilder::new(Kind::Custom(1), "list".to_string(), tags)
+        let auth_event = EventBuilder::new(Kind::Custom(1), "list".to_string())
+            .tags(tags)
             .sign_with_keys(&keypair)
             .unwrap();
 
@@ -1344,7 +1346,8 @@ mod tests {
             Tag::hashtag("delete"),
             Tag::expiration(Timestamp::from(1643723400)),
         ];
-        let auth_event = EventBuilder::new(Kind::Custom(1), "delete".to_string(), tags)
+        let auth_event = EventBuilder::new(Kind::Custom(1), "delete".to_string())
+            .tags(tags)
             .sign_with_keys(&keypair)
             .unwrap();
 
@@ -1385,7 +1388,8 @@ mod tests {
             Tag::hashtag("upload"),
             Tag::expiration(Timestamp::from(1643723400)),
         ];
-        let auth_event = EventBuilder::new(Kind::Custom(1), "upload".to_string(), tags)
+        let auth_event = EventBuilder::new(Kind::Custom(1), "upload".to_string())
+            .tags(tags)
             .sign_with_keys(&keypair)
             .unwrap();
 
@@ -1530,7 +1534,8 @@ mod tests {
         ];
 
         // Create the auth header
-        let auth_event = EventBuilder::new(Kind::Custom(1), "upload".to_string(), tags)
+        let auth_event = EventBuilder::new(Kind::Custom(1), "upload".to_string())
+            .tags(tags)
             .sign_with_keys(&keypair)
             .unwrap();
 
@@ -1775,7 +1780,8 @@ mod tests {
     }
 
     fn generate_blossom_auth_header(keys: Keys, action: String, tags: Vec<Tag>) -> String {
-        let json_event = EventBuilder::new(Kind::Custom(24242), action, tags)
+        let json_event = EventBuilder::new(Kind::Custom(24242), action)
+            .tags(tags)
             .sign_with_keys(&keys)
             .unwrap()
             .as_json();

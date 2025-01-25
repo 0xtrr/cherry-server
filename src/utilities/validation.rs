@@ -131,7 +131,8 @@ mod tests {
 
     #[test]
     fn test_validate_auth_event_invalid_kind() {
-        let event = EventBuilder::new(Kind::TextNote, "test", vec![])
+        let event = EventBuilder::new(Kind::TextNote, "test")
+            .tags(vec![])
             .sign_with_keys(&Keys::generate())
             .unwrap();
 
@@ -143,7 +144,8 @@ mod tests {
     #[test]
     fn test_validate_auth_event_invalid_created_at() {
         // Create event with invalid created_at
-        let event = EventBuilder::new(Kind::Custom(24242), "test", vec![])
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![])
             .custom_created_at(Timestamp::from(chrono::Utc::now().timestamp() as u64 + 100))
             .sign_with_keys(&Keys::generate())
             .unwrap();
@@ -156,13 +158,13 @@ mod tests {
     #[test]
     fn test_validate_auth_event_expired() {
         // Create event with expired expiration tag
-        let event = EventBuilder::new(
-            Kind::Custom(24242),
-            "test",
-            vec![Tag::custom(TagKind::Expiration, Some("1".to_string()))],
-        )
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![Tag::custom(
+                TagKind::Expiration,
+                Some("1".to_string()),
+            )])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
 
         let result = validate_auth_event(&event, "upload");
         assert!(result.is_err());
@@ -172,7 +174,8 @@ mod tests {
     #[test]
     fn test_validate_auth_event_missing_expiration_tag() {
         // Create event with expired expiration tag
-        let event = EventBuilder::new(Kind::Custom(24242), "test", vec![])
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![])
             .sign_with_keys(&Keys::generate())
             .unwrap();
 
@@ -184,19 +187,16 @@ mod tests {
     #[test]
     fn test_validate_auth_event_incorrect_action() {
         // Create event with expired expiration tag
-        let event = EventBuilder::new(
-            Kind::Custom(24242),
-            "test",
-            vec![
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![
                 Tag::expiration(Timestamp::from(chrono::Utc::now().timestamp() as u64)),
                 Tag::custom(
                     TagKind::SingleLetter(SingleLetterTag::from_char('t').unwrap()),
                     Some("download".to_string()),
                 ),
-            ],
-        )
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
+            ])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
 
         let result = validate_auth_event(&event, "upload");
 
@@ -207,15 +207,12 @@ mod tests {
     #[test]
     fn test_validate_auth_event_missing_action_tag() {
         // Create event with expired expiration tag
-        let event = EventBuilder::new(
-            Kind::Custom(24242),
-            "test",
-            vec![Tag::expiration(Timestamp::from(
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![Tag::expiration(Timestamp::from(
                 chrono::Utc::now().timestamp() as u64,
-            ))],
-        )
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
+            ))])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
 
         let result = validate_auth_event(&event, "upload");
 
@@ -226,10 +223,8 @@ mod tests {
     #[test]
     fn test_validate_auth_event_valid() {
         // Create event with expired expiration tag
-        let event = EventBuilder::new(
-            Kind::Custom(24242),
-            "test",
-            vec![
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![
                 Tag::expiration(Timestamp::from(
                     chrono::Utc::now().timestamp() as u64 + 100000,
                 )),
@@ -237,10 +232,9 @@ mod tests {
                     TagKind::SingleLetter(SingleLetterTag::from_char('t').unwrap()),
                     Some("upload".to_string()),
                 ),
-            ],
-        )
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
+            ])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
 
         let result = validate_auth_event(&event, "upload");
 
@@ -249,7 +243,8 @@ mod tests {
 
     #[test]
     fn test_validate_auth_event_x_missing_filehash_tag() {
-        let event = EventBuilder::new(Kind::Custom(24242), "test", vec![])
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![])
             .sign_with_keys(&Keys::generate())
             .unwrap();
 
@@ -260,16 +255,13 @@ mod tests {
 
     #[test]
     fn test_validate_auth_event_x_filehash_not_found() {
-        let event = EventBuilder::new(
-            Kind::Custom(24242),
-            "test",
-            vec![Tag::custom(
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
                 Some("other_hash".to_string()),
-            )],
-        )
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
+            )])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
 
         let result = validate_auth_event_x(&event, "hash");
         assert!(result.is_err());
@@ -278,16 +270,13 @@ mod tests {
 
     #[test]
     fn test_validate_auth_event_x_filehash_found() {
-        let event = EventBuilder::new(
-            Kind::Custom(24242),
-            "test",
-            vec![Tag::custom(
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
                 Some("hash".to_string()),
-            )],
-        )
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
+            )])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
 
         let result = validate_auth_event_x(&event, "hash");
         assert!(result.is_ok());
@@ -296,16 +285,13 @@ mod tests {
 
     #[test]
     fn test_validate_file_hash_invalid_hash() {
-        let event = EventBuilder::new(
-            Kind::Custom(24242),
-            "test",
-            vec![Tag::custom(
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
                 Some("other_hash".to_string()),
-            )],
-        )
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
+            )])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
 
         let body = Bytes::from("Hello, World!");
         let result = validate_file_hash(&event, &body);
@@ -317,16 +303,13 @@ mod tests {
     fn test_validate_file_hash_valid_hash() {
         let body = Bytes::from("Hello, World!");
         let hash = get_sha256_hash(&body);
-        let event = EventBuilder::new(
-            Kind::Custom(24242),
-            "test",
-            vec![Tag::custom(
+        let event = EventBuilder::new(Kind::Custom(24242), "test")
+            .tags(vec![Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::from_char('x').unwrap()),
                 Some(hash.to_string()),
-            )],
-        )
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
+            )])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
 
         let result = validate_file_hash(&event, &body);
         assert!(result.is_ok());
