@@ -1029,7 +1029,7 @@ mod tests {
             &file_hash,
             Bytes::from(file_contents.to_vec()),
         )
-            .unwrap();
+        .unwrap();
 
         // Send a GET request with a Range header to retrieve the blob.
         let response = app
