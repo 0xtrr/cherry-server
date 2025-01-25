@@ -12,7 +12,7 @@ use crate::utilities::validation::{
 use crate::utilities::{bytes_to_mb, get_current_unix_timestamp, split_filehash_and_filetype};
 use crate::{utilities, AppState, BlobDescriptor};
 use axum::body::Bytes;
-use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -128,6 +128,9 @@ pub async fn create_router(app_state: AppState) -> Router {
         .allow_headers(Any)
         .allow_methods(vec![Method::GET, Method::PUT, Method::DELETE, Method::HEAD]);
 
+    // Configuration takes MB size so we calculate the amount of bytes
+    let max_body_limit = app_state.config.upload.max_size * 1024.0 * 1024.0;
+
     // Configure router
     Router::new()
         .route("/", get(|| async { Html(include_str!("html/index.html")) }))
@@ -144,6 +147,7 @@ pub async fn create_router(app_state: AppState) -> Router {
         .route("/list/:pubkey", get(list_blobs_handler))
         .route("/mirror", put(mirror_blob_handler))
         .layer(cors)
+        .layer(DefaultBodyLimit::max(max_body_limit as usize))
         .with_state(app_state)
 }
 
