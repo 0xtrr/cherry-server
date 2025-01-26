@@ -125,17 +125,26 @@ where
     }
 }
 
-fn parse_range_header(header: &str) -> Option<(u64, u64)> {
+fn parse_range_header(header: &str) -> Option<(u64, Option<u64>)> {
     let parts: Vec<&str> = header.split("=").collect();
     if parts.len() != 2 || parts[0] != "bytes" {
         return None;
     }
     let range_parts: Vec<&str> = parts[1].split("-").collect();
-    if range_parts.len() != 2 {
-        return None;
-    }
-    let start = range_parts[0].parse::<u64>().ok()?;
-    let stop = range_parts[1].parse::<u64>().ok()?;
+
+    let start = match range_parts[0] {
+        "" => 0,
+        _ => range_parts[0].parse::<u64>().ok()?,
+    };
+    let stop = if range_parts.len() == 2 {
+        match range_parts[1] {
+            "" => None,
+            _ => Some(range_parts[1].parse::<u64>().ok()?),
+        }
+    } else {
+        None
+    };
+
     Some((start, stop))
 }
 
@@ -270,12 +279,18 @@ pub async fn get_blob_handler(
 
     // Check for Range header (RFC 7233)
     if let Some(range_header) = headers.get(header::RANGE) {
-        let range = parse_range_header(range_header.to_str().unwrap());
+        let range: Option<(u64, Option<u64>)> = parse_range_header(range_header.to_str().unwrap());
         match range {
             Some((start, stop)) => {
-                if start >= stop || start >= file_contents.len() as u64 {
+                if start >= file_contents.len() as u64 {
                     return build_range_not_satisfiable_error_response("Invalid range");
                 }
+
+                let stop = stop.unwrap_or(file_contents.len() as u64 - 1);
+                if start > stop {
+                    return build_range_not_satisfiable_error_response("Invalid range");
+                }
+
                 let partial_response = file_contents[start as usize..(stop as usize + 1)].to_vec();
                 let content_range = format!("bytes {}-{}/{}", start, stop, file_contents.len());
                 let content_length = stop - start + 1;
