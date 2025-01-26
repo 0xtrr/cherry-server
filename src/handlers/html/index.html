@@ -9,8 +9,11 @@
 <p>To use this server, you can send HTTP requests to the following endpoints:</p>
 <ul>
     <li>GET /&lt;hash&gt; - Retrieve a blob by its hash</li>
-    <li>PUT /upload - Upload a new blob</li>
+    <li>HEAD /&lt;hash&gt; - Check if blob exists</li>
+    <li>DELETE /&lt;hash&gt; - Delete blob</li>
+    <li>PUT /&lt;upload&gt; - Upload a new blob</li>
     <li>GET /list/&lt;pubkey&gt; - List all blobs associated with a public key</li>
+    <li>PUT /mirror - Copy blobs from another Blossom server</li>
 </ul>
 <p>For more information on how to use the Blossom protocol, please see the <a href="https://github.com/hzrd149/blossom">Blossom
     documentation</a>.</p>
