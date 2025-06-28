@@ -1,6 +1,6 @@
 use sqlx::migrate::MigrateDatabase;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{Sqlite, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool};
 use std::fmt;
 use std::fmt::Formatter;
 use tracing::log::debug;
@@ -51,6 +51,29 @@ pub async fn set_up_sqlite_db(database_url: String) -> Result<SqlitePool, Error>
         .await
         .map_err(Error::SetupSchema)?;
     debug!("Sqlite startup script finished successfully");
+
+    // Run migration to remove url column if it exists
+    debug!("Checking if url column migration is needed");
+    let url_column_exists = sqlx::query("PRAGMA table_info(blob_descriptors)")
+        .fetch_all(&pool)
+        .await
+        .map_err(Error::SetupSchema)?
+        .iter()
+        .any(|row| {
+            let column_name: String = row.get("name");
+            column_name == "url"
+        });
+
+    if url_column_exists {
+        debug!("URL column found, running migration to remove it");
+        sqlx::query(include_str!("0002-remove-url-column.sql"))
+            .execute(&pool)
+            .await
+            .map_err(Error::SetupSchema)?;
+        debug!("URL column migration completed successfully");
+    } else {
+        debug!("URL column not found, migration not needed");
+    }
 
     Ok(pool)
 }

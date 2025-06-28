@@ -392,9 +392,18 @@ pub async fn list_blobs_handler(
         stmt = stmt.bind(until);
     }
 
-    let blob_descriptors = stmt.fetch_all(&app_state.pool).await.unwrap();
+    let blob_descriptors = match stmt.fetch_all(&app_state.pool).await {
+        Ok(descriptors) => descriptors,
+        Err(_) => return build_internal_server_error_response("Failed to fetch blob descriptors"),
+    };
 
-    Json(blob_descriptors).into_response()
+    // Construct URLs dynamically for each blob descriptor
+    let blob_descriptors_with_urls: Vec<BlobDescriptor> = blob_descriptors
+        .into_iter()
+        .map(|descriptor| descriptor.with_url(&app_state.config.server_url))
+        .collect();
+
+    Json(blob_descriptors_with_urls).into_response()
 }
 
 /// Perform checks for upload that can be done without the actual blob, like whether user is
@@ -537,9 +546,8 @@ pub async fn upload_blob_handler(
 
     // Insert the blob descriptor into the sqlite database
     let result = sqlx::query(
-        "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO blob_descriptors (sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?)"
     )
-        .bind(&blob_descriptor.url)
         .bind(&blob_descriptor.sha256)
         .bind(blob_descriptor.size)
         .bind(&blob_descriptor.r#type)
@@ -565,13 +573,13 @@ pub async fn upload_blob_handler(
                     "Failed to update file reference count",
                 );
             }
-            Json(blob_descriptor).into_response()
+            Json(blob_descriptor.with_url(&app_state.config.server_url)).into_response()
         }
         Err(Error::Database(db_err)) if db_err.is_unique_violation() => {
             // Blob already uploaded by this public key.
             // Return the blob descriptor again, but without increasing the
             // reference count.
-            Json(blob_descriptor).into_response()
+            Json(blob_descriptor.with_url(&app_state.config.server_url)).into_response()
         }
         Err(_) => build_internal_server_error_response("Failed to insert blob descriptor"),
     }
@@ -763,9 +771,8 @@ pub async fn mirror_blob_handler(
     };
 
     let result = sqlx::query(
-        "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO blob_descriptors (sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?)"
     )
-        .bind(&blob_descriptor.url)
         .bind(&blob_descriptor.sha256)
         .bind(blob_descriptor.size)
         .bind(&blob_descriptor.r#type)
@@ -775,7 +782,7 @@ pub async fn mirror_blob_handler(
         .await;
 
     match result {
-        Ok(_) => Json(blob_descriptor).into_response(),
+        Ok(_) => Json(blob_descriptor.with_url(&app_state.config.server_url)).into_response(),
         Err(Error::Database(db_err)) if db_err.is_unique_violation() => {
             build_conflict_error_response("Blob already mirrored by this public key")
         }
@@ -828,9 +835,8 @@ mod tests {
 
         // Insert the blob descriptor into the database
         sqlx::query(
-            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO blob_descriptors (sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?)",
         )
-            .bind(&blob_descriptor.url)
             .bind(&blob_descriptor.sha256)
             .bind(blob_descriptor.size)
             .bind(&blob_descriptor.r#type)
@@ -891,9 +897,8 @@ mod tests {
 
         // Insert the blob descriptor into the database
         sqlx::query(
-            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO blob_descriptors (sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?)",
         )
-            .bind(&blob_descriptor.url)
             .bind(&blob_descriptor.sha256)
             .bind(blob_descriptor.size)
             .bind(&blob_descriptor.r#type)
@@ -1025,9 +1030,8 @@ mod tests {
 
         // Insert the blob descriptor into the database
         sqlx::query(
-            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO blob_descriptors (sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?)",
         )
-            .bind(&blob_descriptor.url)
             .bind(&blob_descriptor.sha256)
             .bind(blob_descriptor.size)
             .bind(&blob_descriptor.r#type)
@@ -1113,18 +1117,17 @@ mod tests {
         let file_hash =
             "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553".to_string();
         let blob_descriptor = BlobDescriptor {
-            url: format!("{}/{}", app_state.config.server_url, file_hash),
+            url: String::new(), // URL will be constructed dynamically
             sha256: file_hash.clone(),
             size: 1024,
             r#type: Some("application/octet-stream".to_string()),
             uploaded: 1643723400,
-        };
+        }.with_url(&app_state.config.server_url);
 
         // Insert the blob descriptor into the database
         sqlx::query(
-            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO blob_descriptors (sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?)",
         )
-            .bind(&blob_descriptor.url)
             .bind(&blob_descriptor.sha256)
             .bind(blob_descriptor.size)
             .bind(&blob_descriptor.r#type)
@@ -1180,9 +1183,8 @@ mod tests {
 
         // Insert the blob descriptor into the database
         sqlx::query(
-            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO blob_descriptors (sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?)",
         )
-            .bind(&blob_descriptor.url)
             .bind(&blob_descriptor.sha256)
             .bind(blob_descriptor.size)
             .bind(&blob_descriptor.r#type)
@@ -1370,9 +1372,8 @@ mod tests {
 
         // Insert the blob descriptor into the database
         sqlx::query(
-            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO blob_descriptors (sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?)",
         )
-            .bind(&blob_descriptor.url)
             .bind(&blob_descriptor.sha256)
             .bind(blob_descriptor.size)
             .bind(&blob_descriptor.r#type)
@@ -1462,9 +1463,8 @@ mod tests {
 
         // Insert the blob descriptor into the database
         sqlx::query(
-            "INSERT INTO blob_descriptors (url, sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO blob_descriptors (sha256, size, type, uploaded, pubkey) VALUES (?, ?, ?, ?, ?)",
         )
-            .bind(&blob_descriptor.url)
             .bind(&blob_descriptor.sha256)
             .bind(blob_descriptor.size)
             .bind(&blob_descriptor.r#type)

@@ -25,11 +25,39 @@ struct AppState {
 
 #[derive(Debug, Serialize, Deserialize, Clone, FromRow)]
 struct BlobDescriptor {
+    #[sqlx(skip)]
     url: String,
     sha256: String,
     size: i64,
     r#type: Option<String>,
     uploaded: i64,
+}
+
+impl Default for BlobDescriptor {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            sha256: String::new(),
+            size: 0,
+            r#type: None,
+            uploaded: 0,
+        }
+    }
+}
+
+impl BlobDescriptor {
+    /// Construct the URL for this blob using the server configuration
+    pub fn with_url(mut self, server_url: &str) -> Self {
+        // Add an extension based on the MIME type
+        let suffix = self.r#type
+            .clone()
+            .and_then(|mime_type| mime2ext::mime2ext(&mime_type))
+            .map(|ext| ".".to_string() + ext)
+            .unwrap_or("".to_string());
+        
+        self.url = format!("{}/{}{}", server_url, self.sha256, suffix);
+        self
+    }
 }
 
 #[derive(Parser)]
